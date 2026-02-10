@@ -9,7 +9,7 @@
 | Name 1 | [@pringlessingles](https://github.com/pringlessingles) | newton.tran@sjsu.edu  |
 | Name 2 | [@under-dogeey](https://github.com/under-dogeey)       | robert.trinh@sjsu.edu |
 | Name 3 | [@ajimenez8203](https://github.com/ajimenez8203)       | aaron.jimenez@sjsu.edu|
-| Name 4 | [@username](https://github.com/username)               | name@sjsu.edu         |
+| Name 4 | [@mkhantkk](https://github.com/mkhantkk)               | minkhant.koko@sjsu.edu|
 
 **Advisor:** [Advisor Name]
 
