@@ -1,0 +1,7 @@
+numpy
+requests
+av
+opencv-python
+torch
+torchvision
+
