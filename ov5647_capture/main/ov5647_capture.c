@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
@@ -10,11 +11,146 @@
 #include "esp_cam_ctlr.h"
 #include "driver/isp.h"
 
+#include "freertos/event_groups.h"
+
+#include "esp_h264_enc_single_hw.h"
+#include "esp_h264_types.h"
+#include "esp_h264_alloc.h"
+
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+
+#include "esp_wifi.h"
+#include "esp_wifi_remote.h"
+
+#include "lwip/sockets.h"
+#include "lwip/inet.h"
+
+#include <unistd.h>
+
 static const char *TAG = "ov5647_capture";
 
 #define CAM_WIDTH       800
 #define CAM_HEIGHT      640
 #define CAM_CLK_MHZ     200
+
+/* Jetson TCP server settings (change to match your Jetson). */
+#define JETSON_TCP_IP   "192.168.1.10"
+#define JETSON_TCP_PORT 5000
+
+/* Tune these later if bandwidth/quality needs adjustment. */
+#define H264_FPS        10
+#define H264_QP_MIN    26
+#define H264_QP_MAX    26
+#define H264_BITRATE_DIV 4
+
+// Wi-Fi Remote STA connection
+#define WIFI_REMOTE_CONNECTED_BIT BIT0
+#define WIFI_REMOTE_FAIL_BIT      BIT1
+#define WIFI_REMOTE_BITS (WIFI_REMOTE_CONNECTED_BIT | WIFI_REMOTE_FAIL_BIT)
+
+static EventGroupHandle_t s_wifi_event_group;
+static int s_wifi_remote_retry_num = 0;
+
+static void event_handler_remote(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    (void)arg;
+    (void)event_data;
+
+    if (event_base == WIFI_REMOTE_EVENT && event_id == WIFI_EVENT_STA_START) {
+        // Kick off connection attempts when STA starts.
+        esp_wifi_remote_connect();
+    } else if (event_base == WIFI_REMOTE_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_wifi_remote_retry_num < CONFIG_ESP_WIFI_REMOTE_MAX_RETRIES) {
+            esp_wifi_remote_connect();
+            s_wifi_remote_retry_num++;
+            ESP_LOGI(TAG, "Remote Wi-Fi: retry to connect (attempt %d)",
+                     s_wifi_remote_retry_num);
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_REMOTE_FAIL_BIT);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        s_wifi_remote_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_REMOTE_CONNECTED_BIT);
+    }
+}
+
+static void wifi_init_remote_sta(void)
+{
+    s_wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    esp_wifi_remote_create_default_sta();
+
+    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_remote_init(&wifi_cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_REMOTE_EVENT, ESP_EVENT_ANY_ID, event_handler_remote, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler_remote, NULL));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = CONFIG_ESP_WIFI_REMOTE_SSID,
+            .password = CONFIG_ESP_WIFI_REMOTE_PASSWORD,
+        },
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_remote_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_remote_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_remote_start());
+
+    ESP_LOGI(TAG, "Waiting for remote Wi-Fi STA connection...");
+    EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_event_group, WIFI_REMOTE_BITS, pdFALSE, pdFALSE, portMAX_DELAY);
+
+    if (bits & WIFI_REMOTE_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Remote Wi-Fi connected (IP acquired).");
+    } else if (bits & WIFI_REMOTE_FAIL_BIT) {
+        ESP_LOGW(TAG, "Remote Wi-Fi failed to connect after retries.");
+    } else {
+        ESP_LOGE(TAG, "Remote Wi-Fi: unexpected event bits=0x%lx", (unsigned long)bits);
+    }
+}
+
+static int tcp_send_all(int sock, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t sent_total = 0;
+    while (sent_total < len) {
+        int s = send(sock, p + sent_total, len - sent_total, 0);
+        if (s <= 0) {
+            return -1;
+        }
+        sent_total += (size_t)s;
+    }
+    return 0;
+}
+
+static int tcp_connect(const char *ip, uint16_t port)
+{
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (sock < 0) {
+        return -1;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
 
 // OV5647 I2C address
 #define OV5647_ADDR     0x36
@@ -77,7 +213,9 @@ static void init_ov5647(i2c_master_dev_handle_t dev)
 static bool on_frame_ready(esp_cam_ctlr_handle_t handle,
                             esp_cam_ctlr_trans_t *trans, void *user_data)
 {
-    ESP_LOGI(TAG, "Frame received: %d bytes", trans->received_size);
+    (void)handle;
+    (void)user_data;
+    ESP_LOGD(TAG, "Frame received: %d bytes", (int)trans->received_size);
     return false; // false = do not free buffer
 }
 
@@ -108,19 +246,70 @@ void app_main(void)
     // 3. Init OV5647 sensor
     init_ov5647(ov5647_dev);
 
-    // 4. Allocate frame buffer in PSRAM
-    size_t buf_size = CAM_WIDTH * CAM_HEIGHT; // RAW8 = 1 byte/pixel
-    uint8_t *frame_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    // 4. Remote Wi-Fi STA (ESP32-P4-WIFI6) — before CSI streaming so TCP can use the link
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    }
+    wifi_init_remote_sta();
+
+    // 5. Allocate camera output buffer in PSRAM (YUV420 = 1.5 bytes/pixel)
+    const size_t yuv_buf_size = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 3 / 2;
+    uint8_t *frame_buf = heap_caps_malloc(yuv_buf_size, MALLOC_CAP_SPIRAM);
     assert(frame_buf != NULL);
 
-    // 5. Configure CSI controller
+    // 6. Initialize H.264 encoder (HW baseline)
+    uint32_t h264_in_alloc_actual = 0;
+    uint8_t *h264_in_buf = esp_h264_aligned_calloc(
+        16, 1, (uint32_t)yuv_buf_size, &h264_in_alloc_actual, ESP_H264_MEM_SPIRAM);
+    assert(h264_in_buf != NULL);
+
+    uint32_t h264_out_alloc_actual = 0;
+    uint8_t *h264_out_buf = esp_h264_aligned_calloc(
+        16, 1, (uint32_t)yuv_buf_size, &h264_out_alloc_actual, ESP_H264_MEM_SPIRAM);
+    assert(h264_out_buf != NULL);
+
+    esp_h264_enc_cfg_hw_t enc_cfg = {0};
+    enc_cfg.pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY;
+    enc_cfg.res.width = CAM_WIDTH;
+    enc_cfg.res.height = CAM_HEIGHT;
+    enc_cfg.fps = H264_FPS;
+    enc_cfg.gop = H264_FPS; // periodic IDR
+    enc_cfg.rc.qp_min = H264_QP_MIN;
+    enc_cfg.rc.qp_max = H264_QP_MAX;
+    enc_cfg.rc.bitrate = (uint32_t)((uint64_t)CAM_WIDTH * (uint64_t)CAM_HEIGHT * (uint64_t)H264_FPS / (uint64_t)H264_BITRATE_DIV);
+
+    esp_h264_enc_handle_t enc = NULL;
+    esp_h264_err_t enc_ret = esp_h264_enc_hw_new(&enc_cfg, &enc);
+    if (enc_ret != ESP_H264_ERR_OK) {
+        ESP_LOGE(TAG, "esp_h264_enc_hw_new failed: %d", enc_ret);
+        return;
+    }
+    enc_ret = esp_h264_enc_open(enc);
+    if (enc_ret != ESP_H264_ERR_OK) {
+        ESP_LOGE(TAG, "esp_h264_enc_open failed: %d", enc_ret);
+        return;
+    }
+
+    esp_h264_enc_in_frame_t in_frame = {0};
+    in_frame.raw_data.buffer = h264_in_buf;
+    in_frame.raw_data.len = (uint32_t)yuv_buf_size;
+    in_frame.pts = 0;
+
+    esp_h264_enc_out_frame_t out_frame = {0};
+    out_frame.raw_data.buffer = h264_out_buf;
+    out_frame.raw_data.len = (uint32_t)yuv_buf_size; // max output size buffer
+    out_frame.length = 0;
+
+    // 7. Configure CSI controller (RAW8 in, YUV420 out)
     esp_cam_ctlr_csi_config_t csi_cfg = {
         .ctlr_id                = 0,
         .h_res                  = CAM_WIDTH,
         .v_res                  = CAM_HEIGHT,
         .lane_bit_rate_mbps     = 200,
         .input_data_color_type  = CAM_CTLR_COLOR_RAW8,
-        .output_data_color_type = CAM_CTLR_COLOR_RAW8,
+        .output_data_color_type = CAM_CTLR_COLOR_YUV420,
         .data_lane_num          = 2,
         .byte_swap_en           = false,
         .queue_items            = 1,
@@ -129,30 +318,84 @@ void app_main(void)
     esp_cam_ctlr_handle_t cam_handle = NULL;
     ESP_ERROR_CHECK(esp_cam_new_csi_ctlr(&csi_cfg, &cam_handle));
 
-    // 6. Register frame callback
+    // 8. Register frame callback
     esp_cam_ctlr_evt_cbs_t cbs = {
         .on_trans_finished = on_frame_ready,
     };
     ESP_ERROR_CHECK(esp_cam_ctlr_register_event_callbacks(cam_handle, &cbs, NULL));
 
-    // 7. Enable and start
+    // 9. Enable and start
     ESP_ERROR_CHECK(esp_cam_ctlr_enable(cam_handle));
     ESP_ERROR_CHECK(esp_cam_ctlr_start(cam_handle));
 
-    ESP_LOGI(TAG, "Camera started, receiving frames...");
+    ESP_LOGI(TAG, "Camera + H264 started, connecting to Jetson TCP...");
 
-    // 8. Receive loop
+    // 10. Connect to Jetson (single persistent TCP connection)
+    int sock = -1;
+    while (sock < 0) {
+        sock = tcp_connect(JETSON_TCP_IP, JETSON_TCP_PORT);
+        if (sock < 0) {
+            ESP_LOGW(TAG, "TCP connect failed, retrying...");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    // 10. Receive loop: CSI frame -> H.264 AU -> TCP send
+    uint32_t frame_idx = 0;
     while (1) {
         esp_cam_ctlr_trans_t trans = {
             .buffer = frame_buf,
-            .buflen = buf_size,
+            .buflen = yuv_buf_size,
         };
-        esp_err_t ret = esp_cam_ctlr_receive(cam_handle, &trans, pdMS_TO_TICKS(1000));
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Frame captured: %dx%d, %d bytes",
-                     CAM_WIDTH, CAM_HEIGHT, trans.received_size);
+
+        esp_err_t cam_ret = esp_cam_ctlr_receive(cam_handle, &trans, pdMS_TO_TICKS(2000));
+        if (cam_ret == ESP_OK && trans.received_size > 0) {
+            // Prepare encoder input.
+            if (trans.received_size != yuv_buf_size) {
+                ESP_LOGW(TAG, "Unexpected YUV size: got %d expected %d",
+                         (int)trans.received_size, (int)yuv_buf_size);
+                continue;
+            }
+
+            in_frame.pts = frame_idx;
+            memcpy(in_frame.raw_data.buffer, frame_buf, yuv_buf_size);
+
+            enc_ret = esp_h264_enc_process(enc, &in_frame, &out_frame);
+            if (enc_ret != ESP_H264_ERR_OK) {
+                ESP_LOGW(TAG, "H264 encode failed: %d", enc_ret);
+                continue;
+            }
+
+            uint32_t au_len = out_frame.length;
+            if (au_len == 0) {
+                ESP_LOGW(TAG, "Zero-length H264 AU");
+                continue;
+            }
+
+            // Frame format: [4-byte BE length][exact H.264 access unit payload]
+            uint8_t len_be[4];
+            len_be[0] = (uint8_t)((au_len >> 24) & 0xFF);
+            len_be[1] = (uint8_t)((au_len >> 16) & 0xFF);
+            len_be[2] = (uint8_t)((au_len >> 8) & 0xFF);
+            len_be[3] = (uint8_t)(au_len & 0xFF);
+
+            if (tcp_send_all(sock, len_be, sizeof(len_be)) != 0 ||
+                tcp_send_all(sock, out_frame.raw_data.buffer, au_len) != 0) {
+                ESP_LOGW(TAG, "TCP send failed, reconnecting...");
+                close(sock);
+                sock = -1;
+                while (sock < 0) {
+                    sock = tcp_connect(JETSON_TCP_IP, JETSON_TCP_PORT);
+                    if (sock < 0) {
+                        ESP_LOGW(TAG, "TCP reconnect failed, retrying...");
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                    }
+                }
+            }
+
+            frame_idx++;
         } else {
-            ESP_LOGW(TAG, "Frame receive timeout or error: 0x%x", ret);
+            ESP_LOGW(TAG, "Frame receive timeout or error: 0x%x", cam_ret);
         }
     }
 }
