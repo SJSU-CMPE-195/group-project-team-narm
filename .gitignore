@@ -64,6 +64,9 @@ out/
 # IDE & Editors
 # ===========================
 
+# Claude Code
+.claude/
+
 # VS Code
 .vscode/
 *.code-workspace
