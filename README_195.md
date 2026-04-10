@@ -1,6 +1,6 @@
 # Project Title
 
-> One-line description of what your project does
+Wearable ASL-to-speech glasses that translates ASL into spoken audio
 
 ## Team
 
@@ -11,22 +11,22 @@
 | Name 3 | [@ajimenez8203](https://github.com/ajimenez8203)       | aaron.jimenez@sjsu.edu|
 | Name 4 | [@mkhantkk](https://github.com/mkhantkk)               | minkhant.koko@sjsu.edu|
 
-**Advisor:** [Advisor Name]
+**Advisor:** [Kaikai Liu]
 
 ---
 
 ## Problem Statement
 
-[2-3 sentences describing the problem you're solving and why it matters]
+About 1 million people in the US uses ASL as their main sign of communication, yet majority of the hearing people do not understand it. Human interpeters are often not available, therefore showing how much gap there is in communcation especially in medical emergency situations. 
 
 ## Solution
 
-[2-3 sentences describing your solution approach]
+Our project is an _Offline_ ASL translation embedded in a pair of glasses. There is a camera that streams the visual through ESP32 to a Jetson Nano which runs a trained model to recongize the hand signs and compose a sentence using a local LLM. The translated sentence then goes to the wearer through text-to-speech audio with no internet required.
 
 ### Key Features
 
-- Feature 1
-- Feature 2
+- Fully offline
+- Wearable factor
 - Feature 3
 
 ---
