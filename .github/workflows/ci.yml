@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, esp32-initialization ]
   pull_request:
     branches: [ main ]
 
@@ -25,6 +25,20 @@ jobs:
             echo "Formatting check failed. Run clang-format on your files and commit the changes."
             exit 1
           fi
+
+  build-esp32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build ov5647_capture (ESP32-P4)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.4.1
+          target: esp32p4
+          path: ov5647_capture
 
   sanity:
     needs: lint
