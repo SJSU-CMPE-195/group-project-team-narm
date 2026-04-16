@@ -11,23 +11,25 @@
 | Name 3 | [@ajimenez8203](https://github.com/ajimenez8203)       | aaron.jimenez@sjsu.edu|
 | Name 4 | [@mkhantkk](https://github.com/mkhantkk)               | minkhant.koko@sjsu.edu|
 
-**Advisor:** [Advisor Name]
+**Advisor:** [Kai Kai Liu]
 
 ---
 
 ## Problem Statement
 
-[2-3 sentences describing the problem you're solving and why it matters]
+In the US, about 1 million people use American Sign Language (ASL) in their daily lives. However, this method of communication is very limited. Firstly, the interaction between the deaf and normal people is one-sided. Non-deaf people may be able to speak to the deaf, but it may be difficult the other way around. Many hearing-impaired people can’t communicate at all via spoken language, making ASL their primary language. Secondly, most people do not know ASL. As of today, there aren’t many available and reliable options for the hearing-impaired to understand hearing individuals.
+
 
 ## Solution
 
-[2-3 sentences describing your solution approach]
+Our solution will be an offline American Sign Language (ASL) translation system fitted into the design of a pair of glasses. Within the glasses, a camera will be connected to an ESP32, which will stream the captured video to a Jetson Orin Nano Super when a button is pressed. The Jetson will do all the backend work and output an interpreted sentence within about 1-4 seconds. The translated sentence will be relayed back to the wearer via text-to-speech audio.
+
 
 ### Key Features
 
-- Feature 1
-- Feature 2
-- Feature 3
+- Real-time video capture via ov5647 camera over MIPI-CSI
+- H.264 encoding and wifi streaming from esp32
+- ASL recognition and translation on Jetson Nano
 
 ---
 
@@ -50,31 +52,49 @@
 
 ## Tech Stack
 
-| Category   | Technology |
-| ---------- | ---------- |
-| Frontend   |            |
-| Backend    |            |
-| Database   |            |
-| Deployment |            |
+| Category   | Technology                      | Justification
+| ---------- | ----------                      | -------------
+| Frontend   |  N/A                            | N/A
+| Backend    |  Python server on Jetson Nano   | Capable of running AI recognition model
+| Database   |  N/A                            | N/A
+| Hardware   |  1. Waveshare ESP32-P4-WIFI6    | 1. H.264 encoding and wifi capabilities
+|            |  2. Jetson Nano                 | 2. Price-to-performance is good         
+| Deployment |  ESP-IDF, JetPack SDK           | Provides native CSI and H.264 driver support
+
 
 ---
 
 ## Getting Started
 
 ### Prerequisites
-
-- [Prerequisite 1] v.X.X+
-- [Prerequisite 2] v.X.X+
+ - ESP-IDF v5.3.2
+ - Python 3.8+
+ - Jetson Nano (with JetPack SDK installed)
+ - ESP32-P4-WIFI6
+ - OV5647 camera module
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/[org]/[repo].git
-cd [repo]
+git clone https://github.com/SJSU-CMPE-195/group-project-team-narm.git
+cd group-project-team-narm
 
-# Install dependencies
-[install command]
+# Set up ESP-IDF v5.3.2
+ - Visit Espressif's website: https://docs.espressif.com/projects/idf-im-ui/en/latest/
+ - Follow Espressif's install guide for your system
+
+#Configure the ESP32-P4 target
+```bash
+idf.py set-target esp32p4
+
+#Build and flash
+```bash
+idf.py build
+idf.py -p <PORT> flash monitor
+
+#Set up Jetson Nano
+(Newton)
 
 # Set up environment variables
 cp .env.example .env
@@ -83,6 +103,18 @@ cp .env.example .env
 # Run database migrations (if applicable)
 [migration command]
 ```
+
+### Running the POC
+1. Power on the esp32 with the ov5647 camera connected via MIPI-CSI.
+2. Flash the firmware using 'idf.py flash' .
+3. The esp32 captures video, encodes it as h.264, and streams it over wifi.
+4. On the Jetson Nano, run the inference server to receive the stream and perform ASL translation.
+
+### What's Next
+- Optimize latency for real-time performance
+- Design and prototype the physical glasses form factor
+- Expand supported ASL vocabulary
+
 
 ### Running Locally
 
