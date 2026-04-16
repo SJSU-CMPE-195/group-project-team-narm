@@ -50,31 +50,49 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 
 ## Tech Stack
 
-| Category   | Technology |
-| ---------- | ---------- |
-| Frontend   |            |
-| Backend    |            |
-| Database   |            |
-| Deployment |            |
+| Category   | Technology                      | Justification
+| ---------- | ----------                      | -------------
+| Frontend   |  N/A                            | N/A
+| Backend    |  Python server on Jetson Nano   | Capable of running AI recognition model
+| Database   |  N/A                            | N/A
+| Hardware   |  1. Waveshare ESP32-P4-WIFI6    | 1. H.264 encoding and wifi capabilities
+|            |  2. Jetson Nano                 | 2. Price-to-performance is good         
+| Deployment |  ESP-IDF, JetPack SDK           | Provides native CSI and H.264 driver support
+
 
 ---
 
 ## Getting Started
 
 ### Prerequisites
-
-- [Prerequisite 1] v.X.X+
-- [Prerequisite 2] v.X.X+
+ - ESP-IDF v5.3.2
+ - Python 3.8+
+ - Jetson Nano (with JetPack SDK installed)
+ - ESP32-P4-WIFI6
+ - OV5647 camera module
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/[org]/[repo].git
-cd [repo]
+git clone https://github.com/SJSU-CMPE-195/group-project-team-narm.git
+cd group-project-team-narm
 
-# Install dependencies
-[install command]
+# Set up ESP-IDF v5.3.2
+ - Visit Espressif's website: https://docs.espressif.com/projects/idf-im-ui/en/latest/
+ - Follow Espressif's install guide for your system
+
+#Configure the ESP32-P4 target
+```bash
+idf.py set-target esp32p4
+
+#Build and flash
+```bash
+idf.py build
+idf.py -p <PORT> flash monitor
+
+#Set up Jetson Nano
+(Newton)
 
 # Set up environment variables
 cp .env.example .env
@@ -83,6 +101,18 @@ cp .env.example .env
 # Run database migrations (if applicable)
 [migration command]
 ```
+
+### Running the POC
+1. Power on the esp32 with the ov5647 camera connected via MIPI-CSI.
+2. Flash the firmware using 'idf.py flash' .
+3. The esp32 captures video, encodes it as h.264, and streams it over wifi.
+4. On the Jetson Nano, run the inference server to receive the stream and perform ASL translation.
+
+### What's Next
+- Optimize latency for real-time performance
+- Design and prototype the physical glasses form factor
+- Expand supported ASL vocabulary
+
 
 ### Running Locally
 
