@@ -1,0 +1,12 @@
+dependencies:
+  idf: ">=5.3"
+  esp_video:
+    override_path: "../../../WLASL/esp-video-components/esp_video"
+  example_video_common:
+    override_path: "../../../WLASL/esp-video-components/esp_video/examples/common_components/example_video_common"
+  protocol_examples_common:
+    path: ${IDF_PATH}/examples/common_components/protocol_examples_common
+  esp_wifi_remote:
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"

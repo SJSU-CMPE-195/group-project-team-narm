@@ -1,0 +1,8 @@
+numpy
+av
+mediapipe
+
+# TensorFlow is required, but on Jetson you should install the JetPack-matched
+# NVIDIA build (not generic PyPI) per NVIDIA docs for your JetPack version.
+# See README.md for details.
+
