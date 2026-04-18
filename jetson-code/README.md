@@ -34,6 +34,22 @@ This README matches the setup that was validated on **JetPack 6** using:
 
 This is **not** the same as creating a **venv on the bare Jetson host** (`python3 -m venv` outside Docker); if you install on the host only, you may need different wheels—use the same pins only if your platform provides matching binaries.
 
+### First-time setup (create the container)
+
+This creates a **persistent** named container `asl_infer` (no `--rm`). After this one-time step, you can follow the **After reboot** section (`docker start -ai asl_infer`) to re-enter the same environment.
+
+```bash
+# On the Jetson host (outside the container)
+cd ~/group-project-team-narm
+
+docker run -it --name asl_infer --net=host \
+  -v "$HOME/group-project-team-narm:/workspace/group-project-team-narm" \
+  tensorflow2:2.21.0-r36.4.tegra-aarch64-cu126-22.04-tensorflow2_2.21.0 \
+  bash
+```
+
+Then run the rest of the steps in this README **inside** the container (pip installs + `MODEL_PATH=... python3 main.py`).
+
 **Working directory to run the app:**
 
 ```text
