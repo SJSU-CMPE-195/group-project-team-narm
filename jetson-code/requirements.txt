@@ -1,8 +1,24 @@
-numpy
-av
-mediapipe
+# Jetson/container lockfile (validated with Jetson AI Lab index: jp6/cu126, Python 3.10, aarch64).
+#
+# Install order (do not skip — see README.md "Exact install order"):
+#   1) python3 -m pip install "matplotlib>=3.8" --only-binary=:all:
+#   2) python3 -m pip install -r requirements.txt
+#   3) python3 -m pip install "mediapipe==0.10.18" --no-deps
+#   4) python3 -m pip install attrs sentencepiece sounddevice
+#
+# Why step 3: plain `pip install mediapipe` can trigger an old matplotlib source build that fails on Python 3.10.
 
-# TensorFlow is required, but on Jetson you should install the JetPack-matched
-# NVIDIA build (not generic PyPI) per NVIDIA docs for your JetPack version.
-# See README.md for details.
+# --- Core pins (TF 2.15 + NumPy 1.26; do not mix TF 2.21 + protobuf 6 with MediaPipe 0.10.x) ---
+numpy==1.26.4
+protobuf==4.25.9
+tensorflow==2.15.1
+opencv-python-headless==4.10.0.84
 
+matplotlib==3.10.8
+av==17.0.0
+
+attrs>=25.0
+sentencepiece==0.2.1
+sounddevice==0.5.5
+
+# mediapipe==0.10.18 — installed in step 3 with: pip install "mediapipe==0.10.18" --no-deps
