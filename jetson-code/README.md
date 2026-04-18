@@ -200,6 +200,25 @@ MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 pytho
 
 The process **does not exit** on its own: it listens for TCP and blocks on an internal queue until H.264 payloads arrive. **Ctrl+C** may interrupt while waiting (e.g. `KeyboardInterrupt` in `queue.get`)—expected when stopping the server.
 
+## After reboot (persistent container: `asl_infer`)
+
+If you are using the named container **`asl_infer`** (validated workflow), dependencies installed inside it will persist across reboots. You only need to reinstall dependencies if you delete/recreate the container.
+
+On the Jetson host:
+
+```bash
+docker ps -a | grep asl_infer
+docker start -ai asl_infer
+```
+
+Inside the container:
+
+```bash
+cd /workspace/group-project-team-narm/jetson-code
+python3 -c "import tensorflow, mediapipe, cv2, av; print('deps ok')"
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 python3 main.py
+```
+
 ## Expected output
 
 When the server starts:
