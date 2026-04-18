@@ -211,7 +211,9 @@ From `jetson-code/`:
 
 ```bash
 cd /workspace/group-project-team-narm/jetson-code
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 python3 main.py
+PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+python3 main.py
 ```
 
 The process **does not exit** on its own: it listens for TCP and blocks on an internal queue until H.264 payloads arrive. **Ctrl+C** may interrupt while waiting (e.g. `KeyboardInterrupt` in `queue.get`)—expected when stopping the server.
@@ -231,6 +233,10 @@ Inside the container:
 
 ```bash
 cd /workspace/group-project-team-narm/jetson-code
+# One-time (per container): avoid TensorFlow import failures when protobuf C++ backend isn't available.
+echo 'export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python' >> ~/.bashrc
+source ~/.bashrc
+
 python3 -c "import tensorflow, mediapipe, cv2, av; print('deps ok')"
 MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 python3 main.py
 ```
@@ -263,6 +269,7 @@ You may see **non-fatal** messages such as:
 | `libxcb.so.1` missing | `apt-get install -y libxcb1` |
 | `libGL.so.1` missing | Prefer `opencv-python-headless==4.10.0.84` instead of full `opencv-python`, or install `libgl1`. |
 | MediaPipe + protobuf errors with TF 2.21 | Use **TF 2.15.1** + **protobuf 4.25.9** stack documented here; do not mix TF 2.21 + protobuf 6 with MediaPipe 0.10.x in one env. |
+| `import tensorflow` fails with protobuf `_message` / “Selected implementation cpp is not available” | Set `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` (one-off prefix or add `export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` to `~/.bashrc` inside the container). |
 | No gloss output, terminal looks idle | Expected until the ESP32 sends framed H.264 to the open port. |
 
 ## Notes
