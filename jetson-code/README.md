@@ -188,7 +188,100 @@ export MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h
 
 ## Wi-Fi / networking (ESP32)
 
-Ensure the Jetson is the Wi‑Fi access point (AP) if that is your project topology: the ESP32 connects to the Jetson AP and opens a TCP connection to the Jetson. Default receiver port is **`5000`** (matches ESP32 project config).
+The Python stack does **not** configure Wi‑Fi: it only listens on TCP (**default `0.0.0.0:5000`**). The ESP32 must join **some** LAN (router, phone hotspot, or a Wi‑Fi AP hosted on the same machine that runs `main.py`) and open a TCP connection to that receiver’s IP.
+
+**Default TCP port:** **`5000`** (matches `JETSON_TCP_PORT` in the ESP32 project).
+
+### Topology options
+
+- **Same Wi‑Fi as a router or lab AP:** ESP32 + Jetson/PC both join the SSID; set `JETSON_TCP_IP` to the Jetson/PC address on that subnet (often from DHCP).
+- **Phone / travel router hotspot:** Same idea—no public internet required.
+- **This machine or Jetson as Wi‑Fi AP (offline-friendly):** Use the host OS (NetworkManager) to create a hotspot on a Wi‑Fi interface. No USB dongle is required if the board already has a `wifi` device (check with `nmcli device status`).
+
+You do **not** need campus or home Wi‑Fi for a field demo if the receiver hosts its own hotspot SSID.
+
+### Host machine or Jetson as AP (NetworkManager)
+
+1. **Find the Wi‑Fi interface name** (example: `wlP1p1s0` or `wlan0`):
+
+```bash
+nmcli device status
+```
+
+2. **Create and start a hotspot** (replace `IFACE`, `con-name`, `ssid`, and `password`):
+
+```bash
+sudo nmcli device wifi hotspot ifname IFACE con-name ASLHotspot ssid ASLHotspot password 'YourStrongPassphrase'
+```
+
+If the command fails because the interface is busy (e.g. connected to another SSID), disconnect first:
+
+```bash
+sudo nmcli connection down <PreviousConnectionName>
+sudo nmcli device wifi hotspot ifname IFACE con-name ASLHotspot ssid ASLHotspot password 'YourStrongPassphrase'
+```
+
+3. **Get the receiver IPv4** on that interface (ESP32 `JETSON_TCP_IP`). Ubuntu-style hotspots often use **`10.42.0.1/24`** on the AP interface:
+
+```bash
+ip -4 addr show dev IFACE
+```
+
+Confirm SSID/password shown by NetworkManager if needed:
+
+```bash
+nmcli dev wifi show-password
+```
+
+4. **Run `main.py` on that same machine** (or on the Jetson if that is the AP) with default `HOST`/`PORT` so the server listens on all interfaces including the hotspot.
+
+5. **Stop the hotspot** when finished:
+
+```bash
+sudo nmcli connection down ASLHotspot
+```
+
+Reconnect to your usual Wi‑Fi if desired:
+
+```bash
+nmcli device wifi connect YourSSID
+```
+
+To remove the saved hotspot profile:
+
+```bash
+nmcli connection delete ASLHotspot
+```
+
+### ESP32 project settings (must match the network above)
+
+In the ESP-IDF project under **`ov5647_capture/`** (repo root):
+
+**1. `sdkconfig`** (or `idf.py menuconfig` → **OV5647 streaming Wi‑Fi configuration**)
+
+Use the **same** SSID and WPA passphrase as the Wi‑Fi the glasses join (e.g. the hotspot):
+
+```text
+CONFIG_ESP_WIFI_REMOTE_SSID="ASLHotspot"
+CONFIG_ESP_WIFI_REMOTE_PASSWORD="YourStrongPassphrase"
+```
+
+**2. `ov5647_capture/main/ov5647_capture.c`**
+
+Point the TCP client at the receiver IP and port (example for a typical NetworkManager hotspot gateway):
+
+```c
+#define JETSON_TCP_IP "10.42.0.1"
+#define JETSON_TCP_PORT 5000
+```
+
+Use the **actual** IPv4 from `ip -4 addr` on the AP interface if it differs.
+
+Rebuild and flash the firmware after changing these values.
+
+### Airgapped / offline note
+
+Runtime inference does not require WAN. **Provisioning** the Jetson/container (Docker image, `pip`, `apt`) may require network once; copy wheels or save Docker images ahead of time if the device will never reach the internet.
 
 ## Environment variables
 
