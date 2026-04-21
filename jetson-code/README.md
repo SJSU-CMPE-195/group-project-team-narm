@@ -293,6 +293,9 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 
 - **`HOST`** (default `0.0.0.0`)
 - **`PORT`** (default `5000`)
+- **`PREVIEW_HTTP`** (default `0`) — if `1`, start a local MJPEG preview server (browser view of the decoded stream)
+- **`PREVIEW_PORT`** (default `8000`) — port for the MJPEG preview server
+- **`PREVIEW_MAX_SENTENCE`** (default `5`) — max number of gloss tokens shown in the preview “sentence” bar
 - **`SEQUENCE_LENGTH`** (default `30`)
 - **`STABLE_N`** (default `10`)
 - **`THRESHOLD`** (default `0.5`)
@@ -310,6 +313,32 @@ python3 main.py
 ```
 
 The process **does not exit** on its own: it listens for TCP and blocks on an internal queue until H.264 payloads arrive. **Ctrl+C** may interrupt while waiting (e.g. `KeyboardInterrupt` in `queue.get`)—expected when stopping the server.
+
+## Live preview (browser / MJPEG, offline-friendly)
+
+If you want to **see what the ESP32 camera sees**, enable the built-in MJPEG preview server. This works in **headless Docker** (no X11, no `cv2.imshow`) and works **offline** while using the Jetson hotspot.
+
+Run with preview enabled:
+
+```bash
+cd /workspace/group-project-team-narm/jetson-code
+PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+PREVIEW_HTTP=1 PREVIEW_PORT=8000 \
+python3 main.py
+```
+
+Then open the preview page in a browser:
+
+- If you are using the Jetson as a Wi‑Fi hotspot with NetworkManager (common default gateway): **`http://10.42.0.1:8000/`**
+- Otherwise: use the actual IPv4 shown by `ip -4 addr show dev <your_ap_iface>` and open `http://<that_ip>:8000/`
+
+Notes:
+
+- You can open the page from:
+  - the Jetson itself, or
+  - a phone/laptop connected to the same Wi‑Fi (e.g., the Jetson hotspot SSID).
+- Until frames arrive, the page will show a “waiting for frames…” placeholder.
 
 ## After reboot (persistent container: `asl_infer`)
 
@@ -364,6 +393,7 @@ You may see **non-fatal** messages such as:
 | MediaPipe + protobuf errors with TF 2.21 | Use **TF 2.15.1** + **protobuf 4.25.9** stack documented here; do not mix TF 2.21 + protobuf 6 with MediaPipe 0.10.x in one env. |
 | `import tensorflow` fails with protobuf `_message` / “Selected implementation cpp is not available” | Set `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` (one-off prefix or add `export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` to `~/.bashrc` inside the container). |
 | No gloss output, terminal looks idle | Expected until the ESP32 sends framed H.264 to the open port. |
+| Browser preview doesn't load | Ensure you started with `PREVIEW_HTTP=1` and you are browsing to the Jetson's correct IP/port (hotspot often `10.42.0.1:8000`). |
 
 ## Notes
 

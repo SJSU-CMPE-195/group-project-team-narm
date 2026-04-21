@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
 import queue
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Sequence
+
+import cv2
+import numpy as np
 
 from decode_h264 import H264PayloadDecoder
 from holistic_lstm_infer import HolisticLSTMInfer
@@ -41,9 +45,51 @@ def _dbg(message: str, data: dict, hypothesis_id: str) -> None:
     # #endregion agent log
 
 
+def env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+@dataclass
+class LatestState:
+    actions: Sequence[str]
+    max_sentence: int = 5
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    latest_frame_bgr: Optional[np.ndarray] = None
+    latest_sentence: List[str] = field(default_factory=list)
+    latest_probs: Optional[np.ndarray] = None
+
+    def update_frame(self, frame_bgr: np.ndarray) -> None:
+        with self._lock:
+            # Store a copy so the server thread can safely read/overlay it.
+            self.latest_frame_bgr = frame_bgr.copy()
+
+    def push_gloss(self, gloss: str) -> None:
+        with self._lock:
+            if self.latest_sentence and self.latest_sentence[-1] == gloss:
+                return
+            self.latest_sentence.append(gloss)
+            if len(self.latest_sentence) > self.max_sentence:
+                self.latest_sentence = self.latest_sentence[-self.max_sentence :]
+
+    def snapshot(self) -> tuple[Optional[np.ndarray], List[str], Optional[np.ndarray], Sequence[str]]:
+        with self._lock:
+            frame = None if self.latest_frame_bgr is None else self.latest_frame_bgr.copy()
+            sentence = list(self.latest_sentence)
+            probs = None if self.latest_probs is None else np.array(self.latest_probs, copy=True)
+            actions = list(self.actions)
+        return frame, sentence, probs, actions
+
+
 def main() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
     port = env_int("PORT", 5000)
+    preview_http = env_bool("PREVIEW_HTTP", False)
+    preview_port = env_int("PREVIEW_PORT", 8000)
+    preview_max_sentence = env_int("PREVIEW_MAX_SENTENCE", 5)
 
     model_path = os.environ.get("MODEL_PATH", "")
     if not model_path:
@@ -85,6 +131,17 @@ def main() -> None:
     decoder = H264PayloadDecoder()
 
     q: "queue.Queue[bytes]" = queue.Queue(maxsize=200)
+    latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
+
+    if preview_http:
+        try:
+            from preview_http import PreviewHTTPServer
+
+            preview_server = PreviewHTTPServer(latest_state=latest, host="0.0.0.0", port=preview_port)
+            threading.Thread(target=preview_server.serve_forever, daemon=True).start()
+            print(f"[preview] http listening on 0.0.0.0:{preview_port}")
+        except Exception as e:
+            print(f"[preview] disabled (failed to start): {e!r}")
 
     def on_frame(frame):
         try:
@@ -111,6 +168,12 @@ def main() -> None:
         _dbg("payload_decoded", {"frames": len(decoded_frames)}, "H3")
         for df in decoded_frames:
             try:
+                bgr = cv2.cvtColor(df.rgb, cv2.COLOR_RGB2BGR)
+                latest.update_frame(bgr)
+            except Exception:
+                # Preview is best-effort; do not break inference if conversion fails.
+                pass
+            try:
                 pred = infer.push_frame(df.rgb)
             except Exception as e:
                 _dbg("infer_exception", {"err": repr(e)}, "H4")
@@ -119,6 +182,7 @@ def main() -> None:
                 continue
             print(f"[gloss] {pred.gloss} (conf={pred.confidence:.3f})")
             _dbg("gloss_update", {"gloss": pred.gloss, "conf": pred.confidence}, "H4")
+            latest.push_gloss(pred.gloss)
 
         time.sleep(0.001)
 
