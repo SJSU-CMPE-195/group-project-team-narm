@@ -13,9 +13,7 @@
 
 #include "freertos/event_groups.h"
 
-#include "esp_h264_alloc.h"
-#include "esp_h264_enc_single_hw.h"
-#include "esp_h264_types.h"
+#include "driver/jpeg_encode.h"
 
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -40,10 +38,8 @@ static const char *TAG = "ov5647_capture";
 #define JETSON_TCP_PORT 5000
 
 /* Tune these later if bandwidth/quality needs adjustment. */
-#define H264_FPS 10
-#define H264_QP_MIN 26
-#define H264_QP_MAX 26
-#define H264_BITRATE_DIV 4
+#define MJPEG_FPS 10
+#define MJPEG_QUALITY 70 /* 1-100 (higher = better quality + larger frames) */
 
 // Wi-Fi Remote STA connection
 #define WIFI_REMOTE_CONNECTED_BIT BIT0
@@ -253,69 +249,47 @@ void app_main(void) {
   }
   wifi_init_remote_sta();
 
-  // 5. Allocate camera output buffer in PSRAM (YUV420 = 1.5 bytes/pixel)
-  const size_t yuv_buf_size = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 3 / 2;
+  // 5. Allocate camera output buffer in PSRAM (YUV422 = 2 bytes/pixel)
+  const size_t yuv_buf_size = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 2;
   uint8_t *frame_buf = heap_caps_malloc(yuv_buf_size, MALLOC_CAP_SPIRAM);
   assert(frame_buf != NULL);
 
-  // 6. Initialize H.264 encoder (HW baseline)
-  uint32_t h264_in_alloc_actual = 0;
-  uint8_t *h264_in_buf =
-      esp_h264_aligned_calloc(16, 1, (uint32_t)yuv_buf_size,
-                              &h264_in_alloc_actual, ESP_H264_MEM_SPIRAM);
-  assert(h264_in_buf != NULL);
+  // 6. Initialize JPEG encoder engine (ESP32-P4 JPEG HW)
+  jpeg_encoder_handle_t jpeg_enc = NULL;
+  jpeg_encode_engine_cfg_t jpeg_eng_cfg = {
+      .intr_priority = 0,
+      // If encoding ever stalls, we want to drop frames rather than block capture forever.
+      .timeout_ms = 200,
+  };
+  ESP_ERROR_CHECK(jpeg_new_encoder_engine(&jpeg_eng_cfg, &jpeg_enc));
 
-  uint32_t h264_out_alloc_actual = 0;
-  uint8_t *h264_out_buf =
-      esp_h264_aligned_calloc(16, 1, (uint32_t)yuv_buf_size,
-                              &h264_out_alloc_actual, ESP_H264_MEM_SPIRAM);
-  assert(h264_out_buf != NULL);
+  jpeg_encode_cfg_t jpeg_cfg = {
+      .height = CAM_HEIGHT,
+      .width = CAM_WIDTH,
+      .src_type = JPEG_ENC_SRC_YUV422,
+      .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
+      .image_quality = MJPEG_QUALITY,
+  };
 
-  esp_h264_enc_cfg_hw_t enc_cfg = {0};
-  enc_cfg.pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY;
-  enc_cfg.res.width = CAM_WIDTH;
-  enc_cfg.res.height = CAM_HEIGHT;
-  enc_cfg.fps = H264_FPS;
-  enc_cfg.gop = H264_FPS; // periodic IDR
-  enc_cfg.rc.qp_min = H264_QP_MIN;
-  enc_cfg.rc.qp_max = H264_QP_MAX;
-  enc_cfg.rc.bitrate =
-      (uint32_t)((uint64_t)CAM_WIDTH * (uint64_t)CAM_HEIGHT *
-                 (uint64_t)H264_FPS / (uint64_t)H264_BITRATE_DIV);
+  // JPEG size varies; allocate a generous PSRAM output buffer.
+  // Rule of thumb: allow up to ~1 byte/pixel at moderate quality.
+  // (Keep headroom: encoder may not always error cleanly when outbuf too small.)
+  const size_t jpeg_out_cap = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 2;
+  uint8_t *jpeg_out_buf = heap_caps_malloc(jpeg_out_cap, MALLOC_CAP_SPIRAM);
+  assert(jpeg_out_buf != NULL);
 
-  esp_h264_enc_handle_t enc = NULL;
-  esp_h264_err_t enc_ret = esp_h264_enc_hw_new(&enc_cfg, &enc);
-  if (enc_ret != ESP_H264_ERR_OK) {
-    ESP_LOGE(TAG, "esp_h264_enc_hw_new failed: %d", enc_ret);
-    return;
-  }
-  enc_ret = esp_h264_enc_open(enc);
-  if (enc_ret != ESP_H264_ERR_OK) {
-    ESP_LOGE(TAG, "esp_h264_enc_open failed: %d", enc_ret);
-    return;
-  }
-
-  esp_h264_enc_in_frame_t in_frame = {0};
-  in_frame.raw_data.buffer = h264_in_buf;
-  in_frame.raw_data.len = (uint32_t)yuv_buf_size;
-  in_frame.pts = 0;
-
-  esp_h264_enc_out_frame_t out_frame = {0};
-  out_frame.raw_data.buffer = h264_out_buf;
-  out_frame.raw_data.len = (uint32_t)yuv_buf_size; // max output size buffer
-  out_frame.length = 0;
-
-  // 7. Configure CSI controller (RAW8 in, YUV420 out)
+  // 7. Configure CSI controller (RAW8 in, YUV422 out for JPEG encoder)
   esp_cam_ctlr_csi_config_t csi_cfg = {
       .ctlr_id = 0,
       .h_res = CAM_WIDTH,
       .v_res = CAM_HEIGHT,
       .lane_bit_rate_mbps = 200,
       .input_data_color_type = CAM_CTLR_COLOR_RAW8,
-      .output_data_color_type = CAM_CTLR_COLOR_YUV420,
+      .output_data_color_type = CAM_CTLR_COLOR_YUV422,
       .data_lane_num = 2,
       .byte_swap_en = false,
-      .queue_items = 1,
+      // More buffering reduces "queue full" during encode/send spikes.
+      .queue_items = 4,
   };
 
   esp_cam_ctlr_handle_t cam_handle = NULL;
@@ -332,7 +306,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_cam_ctlr_enable(cam_handle));
   ESP_ERROR_CHECK(esp_cam_ctlr_start(cam_handle));
 
-  ESP_LOGI(TAG, "Camera + H264 started, connecting to Jetson TCP...");
+  ESP_LOGI(TAG, "Camera + MJPEG started, connecting to Jetson TCP...");
 
   // 10. Connect to Jetson (single persistent TCP connection)
   int sock = -1;
@@ -344,7 +318,7 @@ void app_main(void) {
     }
   }
 
-  // 10. Receive loop: CSI frame -> H.264 AU -> TCP send
+  // 10. Receive loop: CSI frame -> JPEG -> TCP send
   uint32_t frame_idx = 0;
   while (1) {
     esp_cam_ctlr_trans_t trans = {
@@ -355,37 +329,32 @@ void app_main(void) {
     esp_err_t cam_ret =
         esp_cam_ctlr_receive(cam_handle, &trans, pdMS_TO_TICKS(2000));
     if (cam_ret == ESP_OK && trans.received_size > 0) {
-      // Prepare encoder input.
       if (trans.received_size != yuv_buf_size) {
         ESP_LOGW(TAG, "Unexpected YUV size: got %d expected %d",
                  (int)trans.received_size, (int)yuv_buf_size);
         continue;
       }
 
-      in_frame.pts = frame_idx;
-      memcpy(in_frame.raw_data.buffer, frame_buf, yuv_buf_size);
-
-      enc_ret = esp_h264_enc_process(enc, &in_frame, &out_frame);
-      if (enc_ret != ESP_H264_ERR_OK) {
-        ESP_LOGW(TAG, "H264 encode failed: %d", enc_ret);
+      uint32_t jpeg_len = 0;
+      esp_err_t jpeg_ret =
+          jpeg_encoder_process(jpeg_enc, &jpeg_cfg, frame_buf,
+                               (uint32_t)yuv_buf_size, jpeg_out_buf,
+                               (uint32_t)jpeg_out_cap, &jpeg_len);
+      if (jpeg_ret != ESP_OK || jpeg_len == 0) {
+        ESP_LOGW(TAG, "JPEG encode failed: 0x%x len=%u", (unsigned)jpeg_ret,
+                 (unsigned)jpeg_len);
         continue;
       }
 
-      uint32_t au_len = out_frame.length;
-      if (au_len == 0) {
-        ESP_LOGW(TAG, "Zero-length H264 AU");
-        continue;
-      }
-
-      // Frame format: [4-byte BE length][exact H.264 access unit payload]
+      // Frame format: [4-byte BE length][exact JPEG payload]
       uint8_t len_be[4];
-      len_be[0] = (uint8_t)((au_len >> 24) & 0xFF);
-      len_be[1] = (uint8_t)((au_len >> 16) & 0xFF);
-      len_be[2] = (uint8_t)((au_len >> 8) & 0xFF);
-      len_be[3] = (uint8_t)(au_len & 0xFF);
+      len_be[0] = (uint8_t)((jpeg_len >> 24) & 0xFF);
+      len_be[1] = (uint8_t)((jpeg_len >> 16) & 0xFF);
+      len_be[2] = (uint8_t)((jpeg_len >> 8) & 0xFF);
+      len_be[3] = (uint8_t)(jpeg_len & 0xFF);
 
       if (tcp_send_all(sock, len_be, sizeof(len_be)) != 0 ||
-          tcp_send_all(sock, out_frame.raw_data.buffer, au_len) != 0) {
+          tcp_send_all(sock, jpeg_out_buf, jpeg_len) != 0) {
         ESP_LOGW(TAG, "TCP send failed, reconnecting...");
         close(sock);
         sock = -1;
@@ -399,6 +368,9 @@ void app_main(void) {
       }
 
       frame_idx++;
+
+      // Simple pacing to avoid saturating the link/receiver.
+      vTaskDelay(pdMS_TO_TICKS(1000 / MJPEG_FPS));
     } else {
       ESP_LOGW(TAG, "Frame receive timeout or error: 0x%x", cam_ret);
     }

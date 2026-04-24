@@ -2,26 +2,42 @@
 
 This folder contains the Jetson-side code for the ESP32 glasses project.
 
-## Stream protocol (matches ESP32 `tryout`)
+## Stream protocol (ESP32 → Jetson)
 
 Single TCP connection. Repeated messages:
 
 - 4-byte big-endian unsigned length
-- followed by exactly `length` bytes of H.264 payload (one access unit)
+- followed by exactly `length` bytes of payload
+
+### Payload format options
+
+- **H.264 access units (old/default)**: payload is one H.264 access unit (AU)
+- **MJPEG (new option)**: payload is one full JPEG frame (JFIF/EXIF bytes)
+
+The ESP32 firmware determines which payload format is sent. The receiver must match.
 
 ## Pipeline overview
 
-ESP32 sends length-prefixed H.264 access units over TCP. The receiver decodes frames, runs MediaPipe Holistic for keypoints, runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
+ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, runs MediaPipe Holistic for keypoints, runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
 
 Until the ESP32 connects and sends frames, `main.py` blocks waiting on an internal queue—no `[gloss]` lines will appear.
 
 ```mermaid
 flowchart LR
   esp32[ESP32_tcp_sender] -->|len_u32be_payload| jetsonTcp[jetson_tcp_ingest]
-  jetsonTcp --> decode[decode_h264_PyAV]
+  jetsonTcp --> decode[decode_h264_PyAV or jpeg_decode]
   decode --> mp[MediaPipe_holistic]
   mp --> lstm[TensorFlow_Keras_LSTM]
   lstm --> stdout[gloss_print_stdout]
+```
+
+### Quick test receiver for MJPEG
+
+If you flashed the MJPEG firmware variant, run:
+
+```bash
+cd /workspace/group-project-team-narm/jetson-code
+python3 decode_jpeg_tcp.py
 ```
 
 ## Documented runtime: container + Jetson AI Lab wheels (what we use)
