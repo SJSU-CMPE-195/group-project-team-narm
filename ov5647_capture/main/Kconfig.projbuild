@@ -1,4 +1,4 @@
-menu "OV5647 streaming Wi-Fi configuration"
+menu "TCP streaming Wi-Fi (ESP32-S3 STA)"
 
 config ESP_WIFI_REMOTE_SSID
     string "Remote Wi-Fi SSID"

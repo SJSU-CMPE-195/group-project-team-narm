@@ -1,13 +1,7 @@
-# ESP32-P4 uses Wi-Fi via co-processor (esp_hosted); host must enable this so
-# esp_wifi_remote links esp_wifi_remote_net2.c (incl. esp_wifi_remote_create_default_sta).
-CONFIG_ESP_HOST_WIFI_ENABLED=y
-# P4 has no CONFIG_SOC_WIFI_HE_SUPPORT, so esp_wifi_he_types.h is not included on the host.
-# esp_hosted iTWT RPC references wifi_twt_* / wifi_itwt_* types; disable ITWT on host build.
-CONFIG_ESP_HOST_WIFI_ENABLED=y
-CONFIG_ESP_HOSTED_ENABLE_ITWT=n
-CONFIG_ESP_HOSTED_ENABLED=y
-CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
-CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+# Seeed XIAO ESP32-S3 Sense (typical SKU: 8MB flash + 8MB OPI PSRAM).
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
