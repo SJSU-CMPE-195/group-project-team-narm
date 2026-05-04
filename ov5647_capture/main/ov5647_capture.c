@@ -15,11 +15,10 @@
 #include <stdio.h>
 #include <string.h>
 
-// Set to 0 to test camera locally (no Wi-Fi/TCP).
-#define ENABLE_TCP_STREAM 0
-// Set to 1: SoftAP "XIAO-CAM" + browser MJPEG at http://192.168.4.1/stream (cannot
-// combine with ENABLE_TCP_STREAM — that path uses STA + Jetson TCP).
-#define ENABLE_WEB_PREVIEW 1
+// Jetson hotspot (ASLHotspot) + TCP JPEG to tcp_ingest_server.py on the Nano.
+#define ENABLE_TCP_STREAM 1
+// SoftAP browser preview at http://192.168.4.1/stream (mutually exclusive with TCP).
+#define ENABLE_WEB_PREVIEW 0
 
 #if ENABLE_TCP_STREAM && ENABLE_WEB_PREVIEW
 #error "Enable only one: ENABLE_TCP_STREAM or ENABLE_WEB_PREVIEW"
@@ -63,8 +62,9 @@ static const char *TAG = "ov5647_capture";
 #define XIAO_PIN_HREF 47
 #define XIAO_PIN_PCLK 13
 
-/* Jetson TCP server settings (change to match your Jetson). */
-#define JETSON_TCP_IP "192.168.1.10"
+/* Jetson tcp_ingest_server.py (listens on 0.0.0.0:5000). Hotspot gateway is often
+ * 10.42.0.1 (Ubuntu nmcli). If TCP fails, on the Jetson run: ip -4 addr show */
+#define JETSON_TCP_IP "10.42.0.1"
 #define JETSON_TCP_PORT 5000
 
 #define MJPEG_FPS 10
@@ -192,43 +192,76 @@ static esp_err_t http_root_get(httpd_req_t *req) {
   static const char html[] =
       "<!DOCTYPE html><html><head><meta charset=utf-8><title>XIAO OV3660</title></head>"
       "<body><h1>XIAO ESP32-S3 + OV3660</h1>"
-      "<p>MJPEG stream: <a href=\"/stream\">/stream</a></p>"
-      "<p><img src=\"/stream\" style=\"max-width:100%%;height:auto\"/></p>"
+      "<p><b>Live view:</b> open <a href=\"/stream\" target=\"_blank\">/stream</a> in a "
+      "new tab (works best), or use the iframe below.</p>"
+      "<iframe src=\"/stream\" title=cam style=\"width:100%%;max-width:640px;height:480px;"
+      "border:1px solid #444;background:#000\"></iframe>"
       "</body></html>";
   httpd_resp_set_type(req, "text/html");
   return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t http_stream_get(httpd_req_t *req) {
-  char hdr[96];
-  httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+/* Raw TCP send: multipart MJPEG must NOT use httpd_resp_send_chunk (that adds
+ * Transfer-Encoding: chunked); many browsers then show only the first frame. */
+static int http_raw_send_all(httpd_req_t *req, const void *data, size_t len) {
+  const char *p = (const char *)data;
+  size_t left = len;
+  while (left > 0) {
+    int n = httpd_send(req, p, left);
+    if (n < 0) {
+      return n;
+    }
+    if (n == 0) {
+      return -1;
+    }
+    p += (size_t)n;
+    left -= (size_t)n;
+  }
+  return 0;
+}
 
+static esp_err_t http_stream_get(httpd_req_t *req) {
+  static const char resp_hdr[] =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+      "Access-Control-Allow-Origin: *\r\n"
+      "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+      "Pragma: no-cache\r\n"
+      "\r\n";
+  if (http_raw_send_all(req, resp_hdr, sizeof(resp_hdr) - 1) != 0) {
+    return ESP_FAIL;
+  }
+
+  char part[96];
   while (1) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
-    int n = snprintf(hdr, sizeof(hdr),
-                     "\r\n--frame\r\nContent-Type: image/jpeg\r\n"
-                     "Content-Length: %u\r\n\r\n",
-                     (unsigned)fb->len);
-    if (n <= 0 || n >= (int)sizeof(hdr)) {
+    if (fb->len == 0) {
+      esp_camera_fb_return(fb);
+      continue;
+    }
+    int pl = snprintf(part, sizeof(part),
+                      "\r\n--frame\r\nContent-Type: image/jpeg\r\n"
+                      "Content-Length: %u\r\n\r\n",
+                      (unsigned)fb->len);
+    if (pl <= 0 || pl >= (int)sizeof(part)) {
       esp_camera_fb_return(fb);
       break;
     }
-    if (httpd_resp_send_chunk(req, hdr, (size_t)n) != ESP_OK) {
+    if (http_raw_send_all(req, part, (size_t)pl) != 0) {
       esp_camera_fb_return(fb);
       break;
     }
-    if (httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len) != ESP_OK) {
+    if (http_raw_send_all(req, fb->buf, fb->len) != 0) {
       esp_camera_fb_return(fb);
       break;
     }
     esp_camera_fb_return(fb);
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
-  (void)httpd_resp_send_chunk(req, NULL, 0);
   return ESP_OK;
 }
 
@@ -264,6 +297,7 @@ static void web_preview_start(void) {
   hcfg.ctrl_port = 32768;
   hcfg.stack_size = 8192;
   hcfg.max_open_sockets = 3;
+  hcfg.send_wait_timeout = 30; /* seconds; long-lived MJPEG stream */
 
   httpd_handle_t server = NULL;
   ESP_ERROR_CHECK(httpd_start(&server, &hcfg));
