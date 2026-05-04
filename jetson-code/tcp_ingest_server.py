@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 
 @dataclass(frozen=True)
-class H264Frame:
+class PayloadFrame:
     payload: bytes
     received_ts: float
 
@@ -29,7 +29,7 @@ class TCPIngestServer:
         self,
         host: str = "0.0.0.0",
         port: int = 5000,
-        on_frame: Optional[Callable[[H264Frame], None]] = None,
+        on_frame: Optional[Callable[[PayloadFrame], None]] = None,
         backlog: int = 1,
     ):
         self.host = host
@@ -66,7 +66,7 @@ class TCPIngestServer:
                                 continue
                             payload = _recv_exact(client, length)
                             if self.on_frame:
-                                self.on_frame(H264Frame(payload=payload, received_ts=time.time()))
+                                self.on_frame(PayloadFrame(payload=payload, received_ts=time.time()))
                         except ConnectionError as e:
                             print(f"[tcp] disconnected: {e}")
                             break
@@ -74,7 +74,7 @@ class TCPIngestServer:
                             continue
 
 
-def _jpeg_saver(out_dir: str = "frames", every_n: int = 1) -> Callable[[H264Frame], None]:
+def _jpeg_saver(out_dir: str = "frames", every_n: int = 1) -> Callable[[PayloadFrame], None]:
     """
     Simple test callback: saves incoming payloads as JPEG files.
     Assumes ESP is sending JPEG frames (your current firmware does).
@@ -84,7 +84,7 @@ def _jpeg_saver(out_dir: str = "frames", every_n: int = 1) -> Callable[[H264Fram
     os.makedirs(out_dir, exist_ok=True)
     counter = {"i": 0}
 
-    def on_frame(frame: H264Frame) -> None:
+    def on_frame(frame: PayloadFrame) -> None:
         counter["i"] += 1
         if every_n > 1 and (counter["i"] % every_n) != 0:
             return
