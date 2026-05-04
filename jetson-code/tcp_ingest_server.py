@@ -73,3 +73,36 @@ class TCPIngestServer:
                         except socket.timeout:
                             continue
 
+
+def _jpeg_saver(out_dir: str = "frames", every_n: int = 1) -> Callable[[H264Frame], None]:
+    """
+    Simple test callback: saves incoming payloads as JPEG files.
+    Assumes ESP is sending JPEG frames (your current firmware does).
+    """
+    import os
+
+    os.makedirs(out_dir, exist_ok=True)
+    counter = {"i": 0}
+
+    def on_frame(frame: H264Frame) -> None:
+        counter["i"] += 1
+        if every_n > 1 and (counter["i"] % every_n) != 0:
+            return
+        ts_ms = int(frame.received_ts * 1000)
+        path = os.path.join(out_dir, f"frame_{ts_ms}_{counter['i']:06d}.jpg")
+        with open(path, "wb") as f:
+            f.write(frame.payload)
+        if (counter["i"] % 30) == 0:
+            print(f"[tcp] saved {counter['i']} frames (latest: {path})")
+
+    return on_frame
+
+
+if __name__ == "__main__":
+    # Usage:
+    #   python tcp_ingest_server.py
+    #
+    # It will save JPEGs into ./frames so you can quickly confirm the OV5647 works.
+    server = TCPIngestServer(port=5000, on_frame=_jpeg_saver(out_dir="frames", every_n=1))
+    server.serve_forever()
+
