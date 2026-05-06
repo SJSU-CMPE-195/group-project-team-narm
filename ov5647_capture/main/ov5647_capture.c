@@ -15,15 +15,9 @@
 #include <stdio.h>
 #include <string.h>
 
-<<<<<<< HEAD
-// Jetson hotspot (ASLHotspot) + TCP JPEG to tcp_ingest_server.py on the Nano.
+// Default: STA Wi‑Fi + TCP JPEG to Jetson ([len:u32be][jpeg] — see jetson-code/).
 #define ENABLE_TCP_STREAM 1
-// SoftAP browser preview at http://192.168.4.1/stream (mutually exclusive with TCP).
-=======
-// Default mode: Jetson ingest — STA Wi‑Fi + length‑prefixed JPEG over TCP (see jetson-code/).
-#define ENABLE_TCP_STREAM 1
-// SoftAP "XIAO-CAM" + browser MJPEG at http://192.168.4.1/stream (mutually exclusive with TCP).
->>>>>>> restore-may2
+// Optional: SoftAP browser MJPEG at http://192.168.4.1/stream (mutually exclusive with TCP).
 #define ENABLE_WEB_PREVIEW 0
 
 #if ENABLE_TCP_STREAM && ENABLE_WEB_PREVIEW
@@ -81,13 +75,8 @@ static const char *TAG = "ov5647_capture";
 #define XIAO_PIN_HREF 47
 #define XIAO_PIN_PCLK 13
 
-<<<<<<< HEAD
-/* Jetson tcp_ingest_server.py (listens on 0.0.0.0:5000). Hotspot gateway is often
- * 10.42.0.1 (Ubuntu nmcli). If TCP fails, on the Jetson run: ip -4 addr show */
-=======
-/* Jetson TCP server settings (change to match your Jetson).
- * Ubuntu NetworkManager hotspot gateway is often 10.42.0.1. */
->>>>>>> restore-may2
+/* Jetson tcp_ingest_server.py / main.py (listen on 0.0.0.0:5000 by default).
+ * Hotspot gateway is often 10.42.0.1 — confirm with `ip -4 addr` on the Jetson. */
 #define JETSON_TCP_IP "10.42.0.1"
 #define JETSON_TCP_PORT 5000
 
@@ -236,24 +225,14 @@ static esp_err_t http_root_get(httpd_req_t *req) {
   return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
 }
 
-<<<<<<< HEAD
-/* Raw TCP send: multipart MJPEG must NOT use httpd_resp_send_chunk (that adds
- * Transfer-Encoding: chunked); many browsers then show only the first frame. */
-=======
->>>>>>> restore-may2
+/* Raw HTTP write for multipart MJPEG. Do NOT use httpd_resp_send_chunk — it adds
+ * Transfer-Encoding: chunked and many browsers show only the first frame. */
 static int http_raw_send_all(httpd_req_t *req, const void *data, size_t len) {
   const char *p = (const char *)data;
   size_t left = len;
   while (left > 0) {
     int n = httpd_send(req, p, left);
-<<<<<<< HEAD
-    if (n < 0) {
-      return n;
-    }
-    if (n == 0) {
-=======
     if (n <= 0) {
->>>>>>> restore-may2
       return -1;
     }
     p += (size_t)n;
@@ -263,11 +242,6 @@ static int http_raw_send_all(httpd_req_t *req, const void *data, size_t len) {
 }
 
 static esp_err_t http_stream_get(httpd_req_t *req) {
-<<<<<<< HEAD
-=======
-  // Send a raw multipart response (do NOT use httpd_resp_send_chunk, which enables
-  // Transfer-Encoding: chunked and causes many browsers to show only a single frame).
->>>>>>> restore-may2
   static const char resp_hdr[] =
       "HTTP/1.1 200 OK\r\n"
       "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
@@ -279,11 +253,7 @@ static esp_err_t http_stream_get(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-<<<<<<< HEAD
-  char part[96];
-=======
   char hdr[96];
->>>>>>> restore-may2
   while (1) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
@@ -294,19 +264,15 @@ static esp_err_t http_stream_get(httpd_req_t *req) {
       esp_camera_fb_return(fb);
       continue;
     }
-    int pl = snprintf(part, sizeof(part),
+    int pl = snprintf(hdr, sizeof(hdr),
                       "\r\n--frame\r\nContent-Type: image/jpeg\r\n"
                       "Content-Length: %u\r\n\r\n",
                       (unsigned)fb->len);
-    if (pl <= 0 || pl >= (int)sizeof(part)) {
+    if (pl <= 0 || pl >= (int)sizeof(hdr)) {
       esp_camera_fb_return(fb);
       break;
     }
-<<<<<<< HEAD
-    if (http_raw_send_all(req, part, (size_t)pl) != 0) {
-=======
-    if (http_raw_send_all(req, hdr, (size_t)n) != 0) {
->>>>>>> restore-may2
+    if (http_raw_send_all(req, hdr, (size_t)pl) != 0) {
       esp_camera_fb_return(fb);
       break;
     }
@@ -315,15 +281,11 @@ static esp_err_t http_stream_get(httpd_req_t *req) {
       break;
     }
     esp_camera_fb_return(fb);
-<<<<<<< HEAD
-    vTaskDelay(pdMS_TO_TICKS(1));
-=======
     // Throttle the preview so the camera pipeline doesn't outpace the client.
     // This reduces cam_hal: FB-OVF when the browser stalls or Wi-Fi is weak.
     if (CAM_FPS > 0) {
       vTaskDelay(pdMS_TO_TICKS(1000 / CAM_FPS));
     }
->>>>>>> restore-may2
   }
   return ESP_OK;
 }
@@ -359,13 +321,8 @@ static void web_preview_start(void) {
   hcfg.server_port = 80;
   hcfg.ctrl_port = 32768;
   hcfg.stack_size = 8192;
-<<<<<<< HEAD
   hcfg.max_open_sockets = 3;
   hcfg.send_wait_timeout = 30; /* seconds; long-lived MJPEG stream */
-=======
-  hcfg.max_open_sockets = 1;   // one MJPEG client at a time
-  hcfg.send_wait_timeout = 30; // seconds; long-lived stream
->>>>>>> restore-may2
 
   httpd_handle_t server = NULL;
   ESP_ERROR_CHECK(httpd_start(&server, &hcfg));
