@@ -1,3 +1,4 @@
+import os
 import socket
 import struct
 import threading
@@ -57,7 +58,18 @@ class TCPIngestServer:
 
                 with client:
                     print(f"[tcp] client connected: {addr}")
-                    client.settimeout(10.0)
+                    try:
+                        client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except OSError:
+                        pass
+                    try:
+                        rcvbuf = int(os.environ.get("TCP_RCVBUF_BYTES", "524288"))
+                        if rcvbuf > 0:
+                            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+                    except OSError:
+                        pass
+                    # Blocking reads for framing — avoids partial timeouts desynchronizing [len][payload].
+                    client.settimeout(None)
                     while not self._stop.is_set():
                         try:
                             header = _recv_exact(client, 4)
@@ -70,6 +82,4 @@ class TCPIngestServer:
                         except ConnectionError as e:
                             print(f"[tcp] disconnected: {e}")
                             break
-                        except socket.timeout:
-                            continue
 
