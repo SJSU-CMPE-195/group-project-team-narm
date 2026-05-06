@@ -10,6 +10,11 @@ from typing import List, Optional, Sequence
 import cv2
 import numpy as np
 
+<<<<<<< HEAD
+=======
+from decode_h264 import H264PayloadDecoder
+from decode_jpeg import JpegPayloadDecoder
+>>>>>>> restore-may2
 from holistic_lstm_infer import HolisticLSTMInfer
 from tcp_ingest_server import TCPIngestServer
 
@@ -53,12 +58,16 @@ def env_bool(name: str, default: bool) -> bool:
 
 def env_str(name: str, default: str) -> str:
     v = os.environ.get(name)
+<<<<<<< HEAD
     return v.strip() if v else default
 
 
 def decode_jpeg_payload_to_bgr(payload: bytes) -> Optional[np.ndarray]:
     arr = np.frombuffer(payload, dtype=np.uint8)
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+=======
+    return v if v is not None and v != "" else default
+>>>>>>> restore-may2
 
 
 @dataclass
@@ -99,7 +108,11 @@ def main() -> None:
     preview_http = env_bool("PREVIEW_HTTP", False)
     preview_port = env_int("PREVIEW_PORT", 8000)
     preview_max_sentence = env_int("PREVIEW_MAX_SENTENCE", 5)
+<<<<<<< HEAD
     payload_format = env_str("PAYLOAD_FORMAT", "jpeg").lower()
+=======
+    payload_format = env_str("PAYLOAD_FORMAT", "jpeg").strip().lower()
+>>>>>>> restore-may2
 
     model_path = os.environ.get("MODEL_PATH", "")
     if not model_path:
@@ -138,13 +151,22 @@ def main() -> None:
         threshold=threshold,
         stable_n=stable_n,
     )
+<<<<<<< HEAD
     h264_decoder = None
     if payload_format == "h264":
         from decode_h264 import H264PayloadDecoder
 
         h264_decoder = H264PayloadDecoder()
+=======
+    if payload_format == "jpeg":
+        decoder = JpegPayloadDecoder()
+    elif payload_format == "h264":
+        decoder = H264PayloadDecoder()
+    else:
+        raise RuntimeError("PAYLOAD_FORMAT must be 'h264' or 'jpeg'")
+>>>>>>> restore-may2
 
-    q: "queue.Queue[bytes]" = queue.Queue(maxsize=200)
+    q: "queue.Queue[bytes]" = queue.Queue(maxsize=16)
     latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
 
     if preview_http:
@@ -173,6 +195,12 @@ def main() -> None:
 
     while True:
         payload = q.get()
+        # Drain backlog: keep only the freshest frame so inference tracks live video under load.
+        while True:
+            try:
+                payload = q.get_nowait()
+            except queue.Empty:
+                break
         _dbg("payload_received", {"bytes": len(payload)}, "H2")
         if payload_format == "h264":
             assert h264_decoder is not None
