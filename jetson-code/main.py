@@ -10,11 +10,8 @@ from typing import List, Optional, Sequence
 import cv2
 import numpy as np
 
-<<<<<<< HEAD
-=======
 from decode_h264 import H264PayloadDecoder
 from decode_jpeg import JpegPayloadDecoder
->>>>>>> restore-may2
 from holistic_lstm_infer import HolisticLSTMInfer
 from tcp_ingest_server import TCPIngestServer
 
@@ -58,16 +55,7 @@ def env_bool(name: str, default: bool) -> bool:
 
 def env_str(name: str, default: str) -> str:
     v = os.environ.get(name)
-<<<<<<< HEAD
-    return v.strip() if v else default
-
-
-def decode_jpeg_payload_to_bgr(payload: bytes) -> Optional[np.ndarray]:
-    arr = np.frombuffer(payload, dtype=np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-=======
     return v if v is not None and v != "" else default
->>>>>>> restore-may2
 
 
 @dataclass
@@ -108,11 +96,7 @@ def main() -> None:
     preview_http = env_bool("PREVIEW_HTTP", False)
     preview_port = env_int("PREVIEW_PORT", 8000)
     preview_max_sentence = env_int("PREVIEW_MAX_SENTENCE", 5)
-<<<<<<< HEAD
-    payload_format = env_str("PAYLOAD_FORMAT", "jpeg").lower()
-=======
     payload_format = env_str("PAYLOAD_FORMAT", "jpeg").strip().lower()
->>>>>>> restore-may2
 
     model_path = os.environ.get("MODEL_PATH", "")
     if not model_path:
@@ -151,20 +135,12 @@ def main() -> None:
         threshold=threshold,
         stable_n=stable_n,
     )
-<<<<<<< HEAD
-    h264_decoder = None
-    if payload_format == "h264":
-        from decode_h264 import H264PayloadDecoder
-
-        h264_decoder = H264PayloadDecoder()
-=======
     if payload_format == "jpeg":
         decoder = JpegPayloadDecoder()
     elif payload_format == "h264":
         decoder = H264PayloadDecoder()
     else:
         raise RuntimeError("PAYLOAD_FORMAT must be 'h264' or 'jpeg'")
->>>>>>> restore-may2
 
     q: "queue.Queue[bytes]" = queue.Queue(maxsize=16)
     latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
@@ -202,54 +178,29 @@ def main() -> None:
             except queue.Empty:
                 break
         _dbg("payload_received", {"bytes": len(payload)}, "H2")
-        if payload_format == "h264":
-            assert h264_decoder is not None
+        try:
+            decoded_frames = decoder.decode_payload(payload)
+        except Exception as e:
+            _dbg("decode_exception", {"err": repr(e), "payload_bytes": len(payload)}, "H3")
+            continue
+        _dbg("payload_decoded", {"frames": len(decoded_frames)}, "H3")
+        for df in decoded_frames:
             try:
-                decoded_frames = h264_decoder.decode_payload(payload)
-            except Exception as e:
-                _dbg("decode_exception", {"err": repr(e), "payload_bytes": len(payload)}, "H3")
-                continue
-            _dbg("payload_decoded", {"frames": len(decoded_frames)}, "H3")
-            for df in decoded_frames:
-                try:
-                    bgr = cv2.cvtColor(df.rgb, cv2.COLOR_RGB2BGR)
-                    latest.update_frame(bgr)
-                except Exception:
-                    # Preview is best-effort; do not break inference if conversion fails.
-                    pass
-                try:
-                    pred = infer.push_frame(df.rgb)
-                except Exception as e:
-                    _dbg("infer_exception", {"err": repr(e)}, "H4")
-                    raise
-                if pred is None:
-                    continue
-                print(f"[gloss] {pred.gloss} (conf={pred.confidence:.3f})")
-                _dbg("gloss_update", {"gloss": pred.gloss, "conf": pred.confidence}, "H4")
-                latest.push_gloss(pred.gloss)
-        else:
-            try:
-                bgr = decode_jpeg_payload_to_bgr(payload)
-            except Exception as e:
-                _dbg("decode_exception", {"err": repr(e), "payload_bytes": len(payload)}, "H3")
-                continue
-            if bgr is None:
-                _dbg("decode_exception", {"err": "imdecode returned None", "payload_bytes": len(payload)}, "H3")
-                continue
-            try:
+                bgr = cv2.cvtColor(df.rgb, cv2.COLOR_RGB2BGR)
                 latest.update_frame(bgr)
             except Exception:
+                # Preview is best-effort; do not break inference if conversion fails.
                 pass
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             try:
-                pred = infer.push_frame(rgb)
+                pred = infer.push_frame(df.rgb)
             except Exception as e:
                 _dbg("infer_exception", {"err": repr(e)}, "H4")
                 raise
-            if pred is not None:
-                print(f"[gloss] {pred.gloss} (conf={pred.confidence:.3f})")
-                _dbg("gloss_update", {"gloss": pred.gloss, "conf": pred.confidence}, "H4")
-                latest.push_gloss(pred.gloss)
+            if pred is None:
+                continue
+            print(f"[gloss] {pred.gloss} (conf={pred.confidence:.3f})")
+            _dbg("gloss_update", {"gloss": pred.gloss, "conf": pred.confidence}, "H4")
+            latest.push_gloss(pred.gloss)
 
         time.sleep(0.001)
 

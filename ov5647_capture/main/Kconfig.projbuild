@@ -2,11 +2,11 @@ menu "TCP streaming Wi-Fi (ESP32-S3 STA)"
 
 config ESP_WIFI_REMOTE_SSID
     string "Remote Wi-Fi SSID"
-    default "ASLHotspot"
+    default "YOUR_SSID"
 
 config ESP_WIFI_REMOTE_PASSWORD
     string "Remote Wi-Fi Password"
-    default "teamnarm123!@#"
+    default "YOUR_PASSWORD"
 
 config ESP_WIFI_REMOTE_MAX_RETRIES
     int "Remote Wi-Fi maximum retry count"
