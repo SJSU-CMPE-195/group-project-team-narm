@@ -80,8 +80,8 @@ static const char *TAG = "ov5647_capture";
 #define JETSON_TCP_IP "10.42.0.1"
 #define JETSON_TCP_PORT 5000
 
-/* Target capture/send FPS cap (~12–15 is stable over Wi‑Fi for VGA JPEG). */
-#define MJPEG_FPS 15
+/* Target capture/send FPS cap. */
+#define MJPEG_FPS 20
 /* esp32-camera: 0–63, lower value = higher quality / larger JPEG (more Mbps). */
 #define MJPEG_ESP_CAM_JPEG_QUALITY 26
 
@@ -321,7 +321,7 @@ static void web_preview_start(void) {
   hcfg.server_port = 80;
   hcfg.ctrl_port = 32768;
   hcfg.stack_size = 8192;
-  hcfg.max_open_sockets = 3;
+  hcfg.max_open_sockets = 1; /* one MJPEG client at a time */
   hcfg.send_wait_timeout = 30; /* seconds; long-lived MJPEG stream */
 
   httpd_handle_t server = NULL;
