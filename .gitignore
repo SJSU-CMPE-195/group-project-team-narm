@@ -182,3 +182,8 @@ dependencies.lock
 
 # Local subtree / component checkouts (if present)
 ov5647_capture/esp-wifi-remote/
+
+# ===========================
+# ESP32-S3 (Arduino) local secrets
+# ===========================
+esp32s3-code/**/secrets.h

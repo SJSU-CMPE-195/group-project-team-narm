@@ -1,93 +1,139 @@
-#include "driver/i2c_master.h"
-#include "driver/isp.h"
-#include "esp_cam_ctlr.h"
-#include "esp_cam_ctlr_csi.h"
+/*
+ * Camera capture for Seeed Studio XIAO ESP32-S3 Sense with OV3660 (DVP +
+ * SCCB). esp32-camera probes the sensor and loads the OV3660 driver.
+ *
+ * Other Sense modules (OV2640, OV5640) use the same Seeed pinout; swap only
+ * the hardware. This replaces the old ESP32-P4 + MIPI CSI-2 OV5647 stack.
+ */
+#include "esp_camera.h"
 #include "esp_err.h"
-#include "esp_ldo_regulator.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "freertos/event_groups.h"
+// Default: STA Wi‑Fi + TCP JPEG to Jetson ([len:u32be][jpeg] — see jetson-code/).
+#define ENABLE_TCP_STREAM 1
+// Optional: SoftAP browser MJPEG at http://192.168.4.1/stream (mutually exclusive with TCP).
+#define ENABLE_WEB_PREVIEW 0
 
-#include "driver/jpeg_encode.h"
+#if ENABLE_TCP_STREAM && ENABLE_WEB_PREVIEW
+#error "Enable only one: ENABLE_TCP_STREAM or ENABLE_WEB_PREVIEW"
+#endif
 
+#if ENABLE_TCP_STREAM || ENABLE_WEB_PREVIEW
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "nvs_flash.h"
-
 #include "esp_wifi.h"
-#include "esp_wifi_remote.h"
-
+#include "nvs_flash.h"
+#endif
+#if ENABLE_TCP_STREAM
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
-
 #include <unistd.h>
+#endif
+#if ENABLE_WEB_PREVIEW
+#include "esp_http_server.h"
+#endif
 
 static const char *TAG = "ov5647_capture";
 
-#define CAM_WIDTH 800
-#define CAM_HEIGHT 640
-#define CAM_CLK_MHZ 200
+#if ENABLE_WEB_PREVIEW
+// Phone/laptop preview: keep bitrate low and FPS stable.
+#define CAM_WIDTH 320
+#define CAM_HEIGHT 240
+#define CAM_FRAME_SIZE FRAMESIZE_QVGA
+#define CAM_JPEG_QUALITY 25
+#define CAM_FPS 15
+#else
+// Jetson ingest: higher FPS and resolution are okay.
+#define CAM_WIDTH 640
+#define CAM_HEIGHT 480
+#define CAM_FRAME_SIZE FRAMESIZE_VGA
+#define CAM_JPEG_QUALITY MJPEG_ESP_CAM_JPEG_QUALITY
+#define CAM_FPS MJPEG_FPS
+#endif
 
-/* Jetson TCP server settings (change to match your Jetson). */
-#define JETSON_TCP_IP "192.168.1.10"
+/* Seeed XIAO ESP32-S3 Sense — OV3660 on the expansion FPC (DVP + SCCB). */
+#define XIAO_PIN_PWDN -1
+#define XIAO_PIN_RESET -1
+#define XIAO_PIN_XCLK 10
+#define XIAO_PIN_SIOD 40
+#define XIAO_PIN_SIOC 39
+#define XIAO_PIN_D7 48
+#define XIAO_PIN_D6 11
+#define XIAO_PIN_D5 12
+#define XIAO_PIN_D4 14
+#define XIAO_PIN_D3 16
+#define XIAO_PIN_D2 18
+#define XIAO_PIN_D1 17
+#define XIAO_PIN_D0 15
+#define XIAO_PIN_VSYNC 38
+#define XIAO_PIN_HREF 47
+#define XIAO_PIN_PCLK 13
+
+/* Jetson tcp_ingest_server.py / main.py (listen on 0.0.0.0:5000 by default).
+ * Hotspot gateway is often 10.42.0.1 — confirm with `ip -4 addr` on the Jetson. */
+#define JETSON_TCP_IP "10.42.0.1"
 #define JETSON_TCP_PORT 5000
 
-/* Tune these later if bandwidth/quality needs adjustment. */
-#define MJPEG_FPS 10
-#define MJPEG_QUALITY 70 /* 1-100 (higher = better quality + larger frames) */
+/* Target capture/send FPS cap (~12–15 is stable over Wi‑Fi for VGA JPEG). */
+#define MJPEG_FPS 15
+/* esp32-camera: 0–63, lower value = higher quality / larger JPEG (more Mbps). */
+#define MJPEG_ESP_CAM_JPEG_QUALITY 26
 
-// Wi-Fi Remote STA connection
-#define WIFI_REMOTE_CONNECTED_BIT BIT0
-#define WIFI_REMOTE_FAIL_BIT BIT1
-#define WIFI_REMOTE_BITS (WIFI_REMOTE_CONNECTED_BIT | WIFI_REMOTE_FAIL_BIT)
+#if ENABLE_TCP_STREAM
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
+#define WIFI_CONNECTED_BITS (WIFI_CONNECTED_BIT | WIFI_FAIL_BIT)
 
 static EventGroupHandle_t s_wifi_event_group;
-static int s_wifi_remote_retry_num = 0;
+static int s_wifi_retry_num = 0;
+static int s_tcp_sock = -1;
 
-static void event_handler_remote(void *arg, esp_event_base_t event_base,
-                                 int32_t event_id, void *event_data) {
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data) {
   (void)arg;
   (void)event_data;
 
-  if (event_base == WIFI_REMOTE_EVENT && event_id == WIFI_EVENT_STA_START) {
-    // Kick off connection attempts when STA starts.
-    esp_wifi_remote_connect();
-  } else if (event_base == WIFI_REMOTE_EVENT &&
+  if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    esp_wifi_connect();
+  } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
-    if (s_wifi_remote_retry_num < CONFIG_ESP_WIFI_REMOTE_MAX_RETRIES) {
-      esp_wifi_remote_connect();
-      s_wifi_remote_retry_num++;
-      ESP_LOGI(TAG, "Remote Wi-Fi: retry to connect (attempt %d)",
-               s_wifi_remote_retry_num);
+    if (s_wifi_retry_num < CONFIG_ESP_WIFI_REMOTE_MAX_RETRIES) {
+      esp_wifi_connect();
+      s_wifi_retry_num++;
+      ESP_LOGI(TAG, "Wi-Fi retry connect (attempt %d)", s_wifi_retry_num);
     } else {
-      xEventGroupSetBits(s_wifi_event_group, WIFI_REMOTE_FAIL_BIT);
+      xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
     }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-    s_wifi_remote_retry_num = 0;
-    xEventGroupSetBits(s_wifi_event_group, WIFI_REMOTE_CONNECTED_BIT);
+    s_wifi_retry_num = 0;
+    xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
   }
 }
 
-static void wifi_init_remote_sta(void) {
+static void wifi_init_sta(void) {
   s_wifi_event_group = xEventGroupCreate();
 
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
+  esp_netif_create_default_wifi_sta();
 
-  esp_wifi_remote_create_default_sta();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-  wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_remote_init(&wifi_cfg));
-
-  ESP_ERROR_CHECK(esp_event_handler_register(
-      WIFI_REMOTE_EVENT, ESP_EVENT_ANY_ID, event_handler_remote, NULL));
-  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                             event_handler_remote, NULL));
+  esp_event_handler_instance_t instance_any_id;
+  esp_event_handler_instance_t instance_got_ip;
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL,
+      &instance_any_id));
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL,
+      &instance_got_ip));
 
   wifi_config_t wifi_config = {
       .sta =
@@ -97,21 +143,23 @@ static void wifi_init_remote_sta(void) {
           },
   };
 
-  ESP_ERROR_CHECK(esp_wifi_remote_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_remote_set_config(WIFI_IF_STA, &wifi_config));
-  ESP_ERROR_CHECK(esp_wifi_remote_start());
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+  ESP_ERROR_CHECK(esp_wifi_start());
 
-  ESP_LOGI(TAG, "Waiting for remote Wi-Fi STA connection...");
-  EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_REMOTE_BITS,
-                                         pdFALSE, pdFALSE, portMAX_DELAY);
+  ESP_LOGI(TAG, "Waiting for Wi-Fi STA connection...");
+  EventBits_t bits =
+      xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BITS, pdFALSE,
+                          pdFALSE, portMAX_DELAY);
 
-  if (bits & WIFI_REMOTE_CONNECTED_BIT) {
-    ESP_LOGI(TAG, "Remote Wi-Fi connected (IP acquired).");
-  } else if (bits & WIFI_REMOTE_FAIL_BIT) {
-    ESP_LOGW(TAG, "Remote Wi-Fi failed to connect after retries.");
+  if (bits & WIFI_CONNECTED_BIT) {
+    ESP_LOGI(TAG, "Wi-Fi connected (IP acquired).");
+    /* Disable modem sleep while streaming — reduces latency/jitter vs default MIN_MODEM. */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+  } else if (bits & WIFI_FAIL_BIT) {
+    ESP_LOGW(TAG, "Wi-Fi failed to connect after retries.");
   } else {
-    ESP_LOGE(TAG, "Remote Wi-Fi: unexpected event bits=0x%lx",
-             (unsigned long)bits);
+    ESP_LOGE(TAG, "Wi-Fi: unexpected event bits=0x%lx", (unsigned long)bits);
   }
 }
 
@@ -147,232 +195,341 @@ static int tcp_connect(const char *ip, uint16_t port) {
     close(sock);
     return -1;
   }
+
+  // Reduce latency for small writes (length header + payload).
+  int one = 1;
+  (void)setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+  int sndbuf = 128 * 1024;
+  (void)setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
   return sock;
 }
+#endif // ENABLE_TCP_STREAM
 
-// OV5647 I2C address
-#define OV5647_ADDR 0x36
-#define I2C_SCL_PIN 8
-#define I2C_SDA_PIN 7
+#if ENABLE_WEB_PREVIEW
+/* SoftAP: join from phone/PC, then open URL in a browser (Chrome / Edge work well). */
+#define WEB_AP_SSID "XIAO-CAM"
+#define WEB_AP_PASS "xiao3660" /* WPA2: min 8 characters */
 
-// LDO init for MIPI CSI 2.5V
-static void init_ldo(void) {
-  esp_ldo_channel_handle_t ldo_mipi_phy = NULL;
-  esp_ldo_channel_config_t ldo_cfg = {
-      .chan_id = 3,
-      .voltage_mv = 2500,
-  };
-  ESP_ERROR_CHECK(esp_ldo_acquire_channel(&ldo_cfg, &ldo_mipi_phy));
-  ESP_LOGI(TAG, "MIPI CSI LDO initialized at 2500mV");
+static esp_err_t http_root_get(httpd_req_t *req) {
+  static const char html[] =
+      "<!DOCTYPE html><html><head><meta charset=utf-8><title>XIAO OV3660</title></head>"
+      "<body><h1>XIAO ESP32-S3 + OV3660</h1>"
+      "<p><b>Live view:</b> open <a href=\"/stream\" target=\"_blank\">/stream</a> in a "
+      "new tab (works best), or use the iframe below.</p>"
+      "<iframe src=\"/stream\" title=cam style=\"width:100%%;max-width:640px;height:480px;"
+      "border:1px solid #444;background:#000\"></iframe>"
+      "</body></html>";
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
 }
 
-// Write one register to OV5647 over I2C
-static esp_err_t ov5647_write_reg(i2c_master_dev_handle_t dev, uint16_t reg,
-                                  uint8_t val) {
-  uint8_t buf[3] = {reg >> 8, reg & 0xFF, val};
-  return i2c_master_transmit(dev, buf, sizeof(buf), pdMS_TO_TICKS(100));
+/* Raw HTTP write for multipart MJPEG. Do NOT use httpd_resp_send_chunk — it adds
+ * Transfer-Encoding: chunked and many browsers show only the first frame. */
+static int http_raw_send_all(httpd_req_t *req, const void *data, size_t len) {
+  const char *p = (const char *)data;
+  size_t left = len;
+  while (left > 0) {
+    int n = httpd_send(req, p, left);
+    if (n <= 0) {
+      return -1;
+    }
+    p += (size_t)n;
+    left -= (size_t)n;
+  }
+  return 0;
 }
 
-// Minimal OV5647 init sequence for MIPI CSI 800x640 RAW8
-static void init_ov5647(i2c_master_dev_handle_t dev) {
-  ESP_LOGI(TAG, "Initializing OV5647...");
+static esp_err_t http_stream_get(httpd_req_t *req) {
+  static const char resp_hdr[] =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+      "Access-Control-Allow-Origin: *\r\n"
+      "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+      "Pragma: no-cache\r\n"
+      "\r\n";
+  if (http_raw_send_all(req, resp_hdr, sizeof(resp_hdr) - 1) != 0) {
+    return ESP_FAIL;
+  }
 
-  // Software reset
-  ov5647_write_reg(dev, 0x0103, 0x01);
-  vTaskDelay(pdMS_TO_TICKS(10));
-
-  // MIPI enable, 2-lane
-  ov5647_write_reg(dev, 0x3018, 0x72);
-  ov5647_write_reg(dev, 0x3019, 0x00);
-  ov5647_write_reg(dev, 0x3034, 0x1A); // 10-bit RAW
-  ov5647_write_reg(dev, 0x3035, 0x21);
-  ov5647_write_reg(dev, 0x3036, 0x46);
-  ov5647_write_reg(dev, 0x303C, 0x11);
-
-  // Resolution 800x640
-  ov5647_write_reg(dev, 0x3820, 0x41);
-  ov5647_write_reg(dev, 0x3821, 0x07);
-  ov5647_write_reg(dev, 0x380C, 0x07);
-  ov5647_write_reg(dev, 0x380D, 0x3C);
-  ov5647_write_reg(dev, 0x380E, 0x03);
-  ov5647_write_reg(dev, 0x380F, 0xE8);
-
-  // Stream on
-  ov5647_write_reg(dev, 0x4800, 0x04);
-  ov5647_write_reg(dev, 0x0100, 0x01);
-
-  ESP_LOGI(TAG, "OV5647 init done");
+  char hdr[96];
+  while (1) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    if (fb->len == 0) {
+      esp_camera_fb_return(fb);
+      continue;
+    }
+    int pl = snprintf(hdr, sizeof(hdr),
+                      "\r\n--frame\r\nContent-Type: image/jpeg\r\n"
+                      "Content-Length: %u\r\n\r\n",
+                      (unsigned)fb->len);
+    if (pl <= 0 || pl >= (int)sizeof(hdr)) {
+      esp_camera_fb_return(fb);
+      break;
+    }
+    if (http_raw_send_all(req, hdr, (size_t)pl) != 0) {
+      esp_camera_fb_return(fb);
+      break;
+    }
+    if (http_raw_send_all(req, fb->buf, fb->len) != 0) {
+      esp_camera_fb_return(fb);
+      break;
+    }
+    esp_camera_fb_return(fb);
+    // Throttle the preview so the camera pipeline doesn't outpace the client.
+    // This reduces cam_hal: FB-OVF when the browser stalls or Wi-Fi is weak.
+    if (CAM_FPS > 0) {
+      vTaskDelay(pdMS_TO_TICKS(1000 / CAM_FPS));
+    }
+  }
+  return ESP_OK;
 }
 
-// Frame callback
-static bool on_frame_ready(esp_cam_ctlr_handle_t handle,
-                           esp_cam_ctlr_trans_t *trans, void *user_data) {
-  (void)handle;
-  (void)user_data;
-  ESP_LOGD(TAG, "Frame received: %d bytes", (int)trans->received_size);
-  return false; // false = do not free buffer
-}
-
-void app_main(void) {
-  // 1. Init LDO
-  init_ldo();
-
-  // 2. Init I2C for OV5647
-  i2c_master_bus_handle_t i2c_bus = NULL;
-  i2c_master_bus_config_t i2c_bus_cfg = {
-      .i2c_port = I2C_NUM_0,
-      .sda_io_num = I2C_SDA_PIN,
-      .scl_io_num = I2C_SCL_PIN,
-      .clk_source = I2C_CLK_SRC_DEFAULT,
-      .glitch_ignore_cnt = 7,
-  };
-  ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus));
-
-  i2c_master_dev_handle_t ov5647_dev = NULL;
-  i2c_device_config_t dev_cfg = {
-      .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-      .device_address = OV5647_ADDR,
-      .scl_speed_hz = 100000,
-  };
-  ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus, &dev_cfg, &ov5647_dev));
-
-  // 3. Init OV5647 sensor
-  init_ov5647(ov5647_dev);
-
-  // 4. Remote Wi-Fi STA (ESP32-P4-WIFI6) — before CSI streaming so TCP can use
-  // the link
+static void web_preview_start(void) {
   esp_err_t nvs_ret = nvs_flash_init();
   if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES ||
       nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     ESP_ERROR_CHECK(nvs_flash_init());
   }
-  wifi_init_remote_sta();
 
-  // 5. Allocate camera output buffer in PSRAM (YUV422 = 2 bytes/pixel)
-  const size_t yuv_buf_size = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 2;
-  uint8_t *frame_buf = heap_caps_malloc(yuv_buf_size, MALLOC_CAP_SPIRAM);
-  assert(frame_buf != NULL);
+  ESP_ERROR_CHECK(esp_netif_init());
+  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  esp_netif_create_default_wifi_ap();
 
-  // 6. Initialize JPEG encoder engine (ESP32-P4 JPEG HW)
-  jpeg_encoder_handle_t jpeg_enc = NULL;
-  jpeg_encode_engine_cfg_t jpeg_eng_cfg = {
-      .intr_priority = 0,
-      // If encoding ever stalls, we want to drop frames rather than block capture forever.
-      .timeout_ms = 200,
+  wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
+
+  wifi_config_t ap = {0};
+  strncpy((char *)ap.ap.ssid, WEB_AP_SSID, sizeof(ap.ap.ssid) - 1);
+  strncpy((char *)ap.ap.password, WEB_AP_PASS, sizeof(ap.ap.password) - 1);
+  ap.ap.ssid_len = (uint8_t)strlen(WEB_AP_SSID);
+  ap.ap.channel = 1;
+  ap.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+  ap.ap.max_connection = 3;
+
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+  ESP_ERROR_CHECK(esp_wifi_start());
+
+  httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
+  hcfg.server_port = 80;
+  hcfg.ctrl_port = 32768;
+  hcfg.stack_size = 8192;
+  hcfg.max_open_sockets = 3;
+  hcfg.send_wait_timeout = 30; /* seconds; long-lived MJPEG stream */
+
+  httpd_handle_t server = NULL;
+  ESP_ERROR_CHECK(httpd_start(&server, &hcfg));
+
+  httpd_uri_t u_root = {.uri = "/",
+                        .method = HTTP_GET,
+                        .handler = http_root_get,
+                        .user_ctx = NULL};
+  httpd_uri_t u_stream = {.uri = "/stream",
+                          .method = HTTP_GET,
+                          .handler = http_stream_get,
+                          .user_ctx = NULL};
+  ESP_ERROR_CHECK(httpd_register_uri_handler(server, &u_root));
+  ESP_ERROR_CHECK(httpd_register_uri_handler(server, &u_stream));
+
+  ESP_LOGI(TAG,
+           "Web preview: join Wi-Fi AP \"%s\" (password \"%s\"), open "
+           "http://192.168.4.1/ or http://192.168.4.1/stream",
+           WEB_AP_SSID, WEB_AP_PASS);
+}
+#endif // ENABLE_WEB_PREVIEW
+
+void app_main(void) {
+  camera_config_t config = {
+      .pin_pwdn = XIAO_PIN_PWDN,
+      .pin_reset = XIAO_PIN_RESET,
+      .pin_xclk = XIAO_PIN_XCLK,
+      .pin_sccb_sda = XIAO_PIN_SIOD,
+      .pin_sccb_scl = XIAO_PIN_SIOC,
+      .pin_d7 = XIAO_PIN_D7,
+      .pin_d6 = XIAO_PIN_D6,
+      .pin_d5 = XIAO_PIN_D5,
+      .pin_d4 = XIAO_PIN_D4,
+      .pin_d3 = XIAO_PIN_D3,
+      .pin_d2 = XIAO_PIN_D2,
+      .pin_d1 = XIAO_PIN_D1,
+      .pin_d0 = XIAO_PIN_D0,
+      .pin_vsync = XIAO_PIN_VSYNC,
+      .pin_href = XIAO_PIN_HREF,
+      .pin_pclk = XIAO_PIN_PCLK,
+
+      .xclk_freq_hz = 20000000,
+      .ledc_timer = LEDC_TIMER_0,
+      .ledc_channel = LEDC_CHANNEL_0,
+
+      .pixel_format = PIXFORMAT_JPEG,
+      .frame_size = CAM_FRAME_SIZE,
+      .jpeg_quality = CAM_JPEG_QUALITY,
+      /* 3 buffers: reduces cam_hal FB-OVF when the app throttles with vTaskDelay
+       * (sensor keeps filling DMA while we wait between esp_camera_fb_get calls). */
+      .fb_count = 4,
+      .fb_location = CAMERA_FB_IN_PSRAM,
+      .grab_mode = CAMERA_GRAB_LATEST,
   };
-  ESP_ERROR_CHECK(jpeg_new_encoder_engine(&jpeg_eng_cfg, &jpeg_enc));
 
-  jpeg_encode_cfg_t jpeg_cfg = {
-      .height = CAM_HEIGHT,
-      .width = CAM_WIDTH,
-      .src_type = JPEG_ENC_SRC_YUV422,
-      .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
-      .image_quality = MJPEG_QUALITY,
-  };
+  ESP_LOGI(TAG,
+           "Camera: OV3660 @ %dx%d JPEG (XIAO ESP32-S3 Sense DVP pinout)",
+           CAM_WIDTH, CAM_HEIGHT);
 
-  // JPEG size varies; allocate a generous PSRAM output buffer.
-  // Rule of thumb: allow up to ~1 byte/pixel at moderate quality.
-  // (Keep headroom: encoder may not always error cleanly when outbuf too small.)
-  const size_t jpeg_out_cap = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 2;
-  uint8_t *jpeg_out_buf = heap_caps_malloc(jpeg_out_cap, MALLOC_CAP_SPIRAM);
-  assert(jpeg_out_buf != NULL);
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG,
+             "esp_camera_init failed (0x%x). Check OV3660 FPC, PSRAM, and pins.",
+             (unsigned)err);
+    while (1) {
+      vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+  }
 
-  // 7. Configure CSI controller (RAW8 in, YUV422 out for JPEG encoder)
-  esp_cam_ctlr_csi_config_t csi_cfg = {
-      .ctlr_id = 0,
-      .h_res = CAM_WIDTH,
-      .v_res = CAM_HEIGHT,
-      .lane_bit_rate_mbps = 200,
-      .input_data_color_type = CAM_CTLR_COLOR_RAW8,
-      .output_data_color_type = CAM_CTLR_COLOR_YUV422,
-      .data_lane_num = 2,
-      .byte_swap_en = false,
-      // More buffering reduces "queue full" during encode/send spikes.
-      .queue_items = 4,
-  };
+  if (esp_camera_sensor_get()) {
+    ESP_LOGI(TAG, "OV3660 sensor driver ready (esp32-camera)");
+  }
 
-  esp_cam_ctlr_handle_t cam_handle = NULL;
-  ESP_ERROR_CHECK(esp_cam_new_csi_ctlr(&csi_cfg, &cam_handle));
+#if ENABLE_TCP_STREAM
+  esp_err_t nvs_ret = nvs_flash_init();
+  if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+      nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    ESP_ERROR_CHECK(nvs_flash_init());
+  }
+  wifi_init_sta();
 
-  // 8. Register frame callback
-  esp_cam_ctlr_evt_cbs_t cbs = {
-      .on_trans_finished = on_frame_ready,
-  };
-  ESP_ERROR_CHECK(
-      esp_cam_ctlr_register_event_callbacks(cam_handle, &cbs, NULL));
-
-  // 9. Enable and start
-  ESP_ERROR_CHECK(esp_cam_ctlr_enable(cam_handle));
-  ESP_ERROR_CHECK(esp_cam_ctlr_start(cam_handle));
-
-  ESP_LOGI(TAG, "Camera + MJPEG started, connecting to Jetson TCP...");
-
-  // 10. Connect to Jetson (single persistent TCP connection)
-  int sock = -1;
-  while (sock < 0) {
-    sock = tcp_connect(JETSON_TCP_IP, JETSON_TCP_PORT);
-    if (sock < 0) {
+  ESP_LOGI(TAG, "Connecting to Jetson TCP...");
+  s_tcp_sock = -1;
+  while (s_tcp_sock < 0) {
+    s_tcp_sock = tcp_connect(JETSON_TCP_IP, JETSON_TCP_PORT);
+    if (s_tcp_sock < 0) {
       ESP_LOGW(TAG, "TCP connect failed, retrying...");
       vTaskDelay(pdMS_TO_TICKS(1000));
     }
   }
+  ESP_LOGI(TAG, "Camera running (Jetson TCP JPEG streaming)");
 
-  // 10. Receive loop: CSI frame -> JPEG -> TCP send
-  uint32_t frame_idx = 0;
+  const int frame_period_ms =
+      (MJPEG_FPS > 0) ? (1000 / MJPEG_FPS) : 0;
+  uint32_t report_frames = 0;
+  uint64_t report_bytes = 0;
+  int64_t report_t0_us = esp_timer_get_time();
+
   while (1) {
-    esp_cam_ctlr_trans_t trans = {
-        .buffer = frame_buf,
-        .buflen = yuv_buf_size,
-    };
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+      ESP_LOGW(TAG, "esp_camera_fb_get failed");
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    report_frames++;
+    report_bytes += fb->len;
 
-    esp_err_t cam_ret =
-        esp_cam_ctlr_receive(cam_handle, &trans, pdMS_TO_TICKS(2000));
-    if (cam_ret == ESP_OK && trans.received_size > 0) {
-      if (trans.received_size != yuv_buf_size) {
-        ESP_LOGW(TAG, "Unexpected YUV size: got %d expected %d",
-                 (int)trans.received_size, (int)yuv_buf_size);
-        continue;
-      }
+    uint32_t jpeg_len = (uint32_t)fb->len;
+    uint8_t len_be[4];
+    len_be[0] = (uint8_t)((jpeg_len >> 24) & 0xFF);
+    len_be[1] = (uint8_t)((jpeg_len >> 16) & 0xFF);
+    len_be[2] = (uint8_t)((jpeg_len >> 8) & 0xFF);
+    len_be[3] = (uint8_t)(jpeg_len & 0xFF);
 
-      uint32_t jpeg_len = 0;
-      esp_err_t jpeg_ret =
-          jpeg_encoder_process(jpeg_enc, &jpeg_cfg, frame_buf,
-                               (uint32_t)yuv_buf_size, jpeg_out_buf,
-                               (uint32_t)jpeg_out_cap, &jpeg_len);
-      if (jpeg_ret != ESP_OK || jpeg_len == 0) {
-        ESP_LOGW(TAG, "JPEG encode failed: 0x%x len=%u", (unsigned)jpeg_ret,
-                 (unsigned)jpeg_len);
-        continue;
-      }
-
-      // Frame format: [4-byte BE length][exact JPEG payload]
-      uint8_t len_be[4];
-      len_be[0] = (uint8_t)((jpeg_len >> 24) & 0xFF);
-      len_be[1] = (uint8_t)((jpeg_len >> 16) & 0xFF);
-      len_be[2] = (uint8_t)((jpeg_len >> 8) & 0xFF);
-      len_be[3] = (uint8_t)(jpeg_len & 0xFF);
-
-      if (tcp_send_all(sock, len_be, sizeof(len_be)) != 0 ||
-          tcp_send_all(sock, jpeg_out_buf, jpeg_len) != 0) {
-        ESP_LOGW(TAG, "TCP send failed, reconnecting...");
-        close(sock);
-        sock = -1;
-        while (sock < 0) {
-          sock = tcp_connect(JETSON_TCP_IP, JETSON_TCP_PORT);
-          if (sock < 0) {
-            ESP_LOGW(TAG, "TCP reconnect failed, retrying...");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-          }
+    if (tcp_send_all(s_tcp_sock, len_be, sizeof(len_be)) != 0 ||
+        tcp_send_all(s_tcp_sock, fb->buf, fb->len) != 0) {
+      ESP_LOGW(TAG, "TCP send failed, reconnecting...");
+      close(s_tcp_sock);
+      s_tcp_sock = -1;
+      while (s_tcp_sock < 0) {
+        s_tcp_sock = tcp_connect(JETSON_TCP_IP, JETSON_TCP_PORT);
+        if (s_tcp_sock < 0) {
+          ESP_LOGW(TAG, "TCP reconnect failed, retrying...");
+          vTaskDelay(pdMS_TO_TICKS(1000));
         }
       }
+    }
 
-      frame_idx++;
+    esp_camera_fb_return(fb);
+    if (frame_period_ms > 0) {
+      vTaskDelay(pdMS_TO_TICKS(frame_period_ms));
+    }
 
-      // Simple pacing to avoid saturating the link/receiver.
-      vTaskDelay(pdMS_TO_TICKS(1000 / MJPEG_FPS));
-    } else {
-      ESP_LOGW(TAG, "Frame receive timeout or error: 0x%x", cam_ret);
+    int64_t now_us = esp_timer_get_time();
+    int64_t dt_us = now_us - report_t0_us;
+    if (dt_us >= 1000000) {
+      float fps = (dt_us > 0)
+                      ? ((float)report_frames * 1000000.0f / (float)dt_us)
+                      : 0.0f;
+      float kbps =
+          (dt_us > 0)
+              ? ((float)report_bytes * 8.0f / 1000.0f) /
+                    ((float)dt_us / 1000000.0f)
+              : 0.0f;
+      ESP_LOGI(TAG, "camera ok: fps=%.1f avg_frame=%u bytes bitrate=%.0f kbps",
+               fps,
+               (unsigned)(report_frames ? (report_bytes / report_frames) : 0),
+               kbps);
+      report_frames = 0;
+      report_bytes = 0;
+      report_t0_us = now_us;
     }
   }
+
+#elif ENABLE_WEB_PREVIEW
+  web_preview_start();
+  ESP_LOGI(TAG, "Camera running (browser web preview; HTTP server owns frames)");
+  while (1) {
+    vTaskDelay(pdMS_TO_TICKS(60000));
+  }
+
+#else
+  ESP_LOGI(TAG, "Camera running (local test mode)");
+
+  const int frame_period_ms =
+      (MJPEG_FPS > 0) ? (1000 / MJPEG_FPS) : 0;
+  uint32_t report_frames = 0;
+  uint64_t report_bytes = 0;
+  int64_t report_t0_us = esp_timer_get_time();
+
+  while (1) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+      ESP_LOGW(TAG, "esp_camera_fb_get failed");
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    report_frames++;
+    report_bytes += fb->len;
+    esp_camera_fb_return(fb);
+
+    if (frame_period_ms > 0) {
+      vTaskDelay(pdMS_TO_TICKS(frame_period_ms));
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    int64_t dt_us = now_us - report_t0_us;
+    if (dt_us >= 1000000) {
+      float fps = (dt_us > 0)
+                      ? ((float)report_frames * 1000000.0f / (float)dt_us)
+                      : 0.0f;
+      float kbps =
+          (dt_us > 0)
+              ? ((float)report_bytes * 8.0f / 1000.0f) /
+                    ((float)dt_us / 1000000.0f)
+              : 0.0f;
+      ESP_LOGI(TAG, "camera ok: fps=%.1f avg_frame=%u bytes bitrate=%.0f kbps",
+               fps,
+               (unsigned)(report_frames ? (report_bytes / report_frames) : 0),
+               kbps);
+      report_frames = 0;
+      report_bytes = 0;
+      report_t0_us = now_us;
+    }
+  }
+#endif
 }
