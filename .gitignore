@@ -187,7 +187,3 @@ ov5647_capture/esp-wifi-remote/
 # ESP32-S3 (Arduino) local secrets
 # ===========================
 esp32s3-code/**/secrets.h
-
-# Training video clips (local only; folder structure tracked via .gitkeep)
-training/raw_videos/**/*
-!training/raw_videos/**/.gitkeep
