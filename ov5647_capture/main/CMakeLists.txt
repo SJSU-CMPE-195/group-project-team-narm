@@ -1,5 +1,5 @@
-# If ENABLE_WEB_PREVIEW is set to 1 in ov5647_capture.c, add: esp_http_server
 idf_component_register(SRCS "ov5647_capture.c"
                     INCLUDE_DIRS "."
-                    REQUIRES esp32_camera esp_psram esp_timer freertos
-                             esp_wifi esp_netif esp_event nvs_flash)
+                    REQUIRES esp_driver_cam esp_driver_isp esp_driver_i2c
+                             esp_hw_support esp_psram esp_driver_jpeg esp_wifi esp_wifi_remote esp_hosted freertos
+                             lwip nvs_flash)

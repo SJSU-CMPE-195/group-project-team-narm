@@ -67,7 +67,6 @@ class HolisticLSTMInfer:
         self._holistic = self._mp_holistic.Holistic(
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
-            model_complexity=0,
         )
 
         self._sequence: List[np.ndarray] = []
