@@ -1,0 +1,101 @@
+menu "H.264 Stream Example Configuration"
+
+    config EXAMPLE_JETSON_IP
+        string "Jetson IP address"
+        default "192.168.4.2"
+        help
+            IP address of the Jetson Orin Nano (receiver).
+
+    config EXAMPLE_JETSON_PORT
+        int "Jetson TCP port"
+        default 5000
+        range 1 65535
+        help
+            TCP port on which the Jetson is listening for the H.264 stream.
+
+    config EXAMPLE_STREAM_BUTTON_GPIO
+        int "Stream toggle button GPIO"
+        default 0
+        help
+            GPIO number for the button. First press = start stream, second press = stop.
+            Assumed active-low (pulled up). Adjust button_task if your button is active-high.
+
+    config EXAMPLE_FRAME_WIDTH
+        int "Capture width"
+        default 1280
+        range 320 1920
+        help
+            Requested OV5647 capture width. The driver may select the nearest
+            supported mode; the negotiated dimensions are printed at startup.
+
+    config EXAMPLE_FRAME_HEIGHT
+        int "Capture height"
+        default 720
+        range 240 1080
+        help
+            Requested OV5647 capture height.
+
+    config EXAMPLE_FRAME_FPS
+        int "Capture frame rate"
+        default 30
+        range 5 60
+        help
+            Requested camera frame rate. The default is 720p30 for responsive
+            hand-motion capture without the cost of 1080p inference frames.
+
+    config EXAMPLE_H264_I_PERIOD
+        int "H.264 I-frame period (frames)"
+        default 30
+        range 1 120
+        help
+            Frames between I-frames. Lower = better seek/recovery, higher bitrate.
+
+    config EXAMPLE_H264_BITRATE
+        int "H.264 bitrate (bps)"
+        default 4000000
+        range 250000 12000000
+        help
+            Target bitrate for H.264 encoding. 4 Mbps is a practical 720p30
+            baseline for preserving hand and finger detail.
+
+    config EXAMPLE_H264_MIN_QP
+        int "H.264 minimum QP"
+        default 25
+        range 0 51
+        help
+            Minimum quantization parameter (higher quality).
+
+    config EXAMPLE_H264_MAX_QP
+        int "H.264 maximum QP"
+        default 35
+        range 0 51
+        help
+            Maximum quantization parameter. Must be > EXAMPLE_H264_MIN_QP.
+
+    config EXAMPLE_TCP_SNDBUF_BYTES
+        int "TCP send buffer (bytes)"
+        default 262144
+        range 32768 1048576
+        help
+            Socket send buffer used to absorb short Wi-Fi scheduling stalls.
+
+    config EXAMPLE_TCP_SEND_TIMEOUT_MS
+        int "TCP send timeout (milliseconds)"
+        default 3000
+        range 250 30000
+        help
+            Stops a dead connection from holding encoder buffers forever.
+
+    config EXAMPLE_RECONNECT_DELAY_MS
+        int "Reconnect delay (milliseconds)"
+        default 1000
+        range 100 30000
+
+    config EXAMPLE_STATS_INTERVAL_SEC
+        int "Performance log interval (seconds)"
+        default 5
+        range 1 60
+        help
+            Reports encoded/sent FPS, bitrate, queue depth, and buffer age.
+
+endmenu

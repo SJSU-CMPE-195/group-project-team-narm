@@ -10,6 +10,7 @@ from typing import Callable, Optional
 class H264Frame:
     payload: bytes
     received_ts: float
+    stream_id: int = 0
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -31,11 +32,13 @@ class TCPIngestServer:
         port: int = 5000,
         on_frame: Optional[Callable[[H264Frame], None]] = None,
         backlog: int = 1,
+        max_payload_bytes: int = 8 * 1024 * 1024,
     ):
         self.host = host
         self.port = port
         self.on_frame = on_frame
         self.backlog = backlog
+        self.max_payload_bytes = max_payload_bytes
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -47,6 +50,7 @@ class TCPIngestServer:
             s.bind((self.host, self.port))
             s.listen(self.backlog)
             print(f"[tcp] listening on {self.host}:{self.port}")
+            stream_id = 0
 
             while not self._stop.is_set():
                 try:
@@ -56,6 +60,7 @@ class TCPIngestServer:
                     continue
 
                 with client:
+                    stream_id += 1
                     print(f"[tcp] client connected: {addr}")
                     client.settimeout(10.0)
                     while not self._stop.is_set():
@@ -64,10 +69,21 @@ class TCPIngestServer:
                             (length,) = struct.unpack(">I", header)
                             if length == 0:
                                 continue
+                            if length > self.max_payload_bytes:
+                                raise ConnectionError(
+                                    f"payload length {length} exceeds limit "
+                                    f"{self.max_payload_bytes}"
+                                )
                             payload = _recv_exact(client, length)
                             if self.on_frame:
-                                self.on_frame(H264Frame(payload=payload, received_ts=time.time()))
-                        except ConnectionError as e:
+                                self.on_frame(
+                                    PayloadFrame(
+                                        payload=payload,
+                                        received_ts=time.monotonic(),
+                                        stream_id=stream_id,
+                                    )
+                                )
+                        except (ConnectionError, OSError) as e:
                             print(f"[tcp] disconnected: {e}")
                             break
                         except socket.timeout:

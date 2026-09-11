@@ -11,8 +11,10 @@ Single TCP connection. Repeated messages:
 
 ### Payload format options
 
-- **H.264 access units (old/default)**: payload is one H.264 access unit (AU)
-- **MJPEG (new option)**: payload is one full JPEG frame (JFIF/EXIF bytes)
+- **H.264 access units (default)**: one complete access unit from the
+  ESP32-P4 hardware encoder. This is the canonical project path.
+- **JPEG frames (legacy/testing)**: one independent JPEG frame from the older
+  XIAO ESP32-S3 or Raspberry Pi sender.
 
 The ESP32 firmware determines which payload format is sent. The receiver must match.
 
@@ -271,9 +273,9 @@ nmcli connection delete ASLHotspot
 
 ### ESP32 project settings (must match the network above)
 
-In the ESP-IDF project under **`ov5647_capture/`** (repo root):
+In the ESP-IDF project under **`esp32-p4/`** (repo root):
 
-**1. `sdkconfig`** (or `idf.py menuconfig` → **OV5647 streaming Wi‑Fi configuration**)
+**1. `idf.py menuconfig` → Example Connection Configuration**
 
 Use the **same** SSID and WPA passphrase as the Wi‑Fi the glasses join (e.g. the hotspot):
 
@@ -282,16 +284,18 @@ CONFIG_ESP_WIFI_REMOTE_SSID="ASLHotspot"
 CONFIG_ESP_WIFI_REMOTE_PASSWORD="YourStrongPassphrase"
 ```
 
-**2. `ov5647_capture/main/ov5647_capture.c`**
+**2. `idf.py menuconfig` → H.264 Stream Example Configuration**
 
 Point the TCP client at the receiver IP and port (example for a typical NetworkManager hotspot gateway):
 
-```c
-#define JETSON_TCP_IP "10.42.0.1"
-#define JETSON_TCP_PORT 5000
-```
+Set the Jetson IP address to `10.42.0.1` and TCP port to `5000`.
 
 Use the **actual** IPv4 from `ip -4 addr` on the AP interface if it differs.
+
+**3. Camera/codec mode**
+
+The canonical firmware always uses the OV5647 MIPI-CSI camera and P4 hardware
+H.264 encoder. Configure resolution, FPS, bitrate, GOP, and QP in menuconfig.
 
 Rebuild and flash the firmware after changing these values.
 
@@ -309,6 +313,13 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 
 - **`HOST`** (default `0.0.0.0`)
 - **`PORT`** (default `5000`)
+- **`PAYLOAD_FORMAT`** (`h264` or `jpeg`; default **`h264`**)
+- **`PAYLOAD_QUEUE_SIZE`** (default `64`) — ordered compressed-payload queue;
+  H.264 input applies TCP backpressure instead of dropping access units
+- **`DECODED_QUEUE_SIZE`** (default `2`) — latest decoded RGB frames retained
+  for inference
+- **`STATS_INTERVAL_SEC`** (default `5`) — pipeline performance log interval
+- **`TCP_RCVBUF_BYTES`** (default `524288`) — optional larger TCP receive buffer for the ingest socket (`tcp_ingest_server.py`, `decode_jpeg_tcp.py`)
 - **`PREVIEW_HTTP`** (default `0`) — if `1`, start a local MJPEG preview server (browser view of the decoded stream)
 - **`PREVIEW_PORT`** (default `8000`) — port for the MJPEG preview server
 - **`PREVIEW_MAX_SENTENCE`** (default `5`) — max number of gloss tokens shown in the preview “sentence” bar
@@ -324,6 +335,7 @@ From `jetson-code/`:
 ```bash
 cd /workspace/group-project-team-narm/jetson-code
 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+PAYLOAD_FORMAT=h264 \
 MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
 python3 main.py
 ```
@@ -408,10 +420,12 @@ You may see **non-fatal** messages such as:
 | `libGL.so.1` missing | Prefer `opencv-python-headless==4.10.0.84` instead of full `opencv-python`, or install `libgl1`. |
 | MediaPipe + protobuf errors with TF 2.21 | Use **TF 2.15.1** + **protobuf 4.25.9** stack documented here; do not mix TF 2.21 + protobuf 6 with MediaPipe 0.10.x in one env. |
 | `import tensorflow` fails with protobuf `_message` / “Selected implementation cpp is not available” | Set `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` (one-off prefix or add `export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` to `~/.bashrc` inside the container). |
-| No gloss output, terminal looks idle | Expected until the ESP32 sends framed H.264 to the open port. |
+| No gloss output, terminal looks idle | Expected until the ESP32 connects and sends length-prefixed H.264 matching `PAYLOAD_FORMAT=h264`. |
 | Browser preview doesn't load | Ensure you started with `PREVIEW_HTTP=1` and you are browsing to the Jetson's correct IP/port (hotspot often `10.42.0.1:8000`). |
 
 ## Notes
 
 - This PoC prints stable predicted gloss tokens to stdout (no gloss→sentence and no TTS).
-- The TCP stream protocol is length-prefixed H.264 access units: `[len:u32be][payload]*` (matches ESP32 sender).
+- The TCP stream protocol is length‑prefixed frames: `[len:u32be][payload]*` (JPEG or H.264 depending on firmware / `PAYLOAD_FORMAT`).
+- H.264 payloads are always decoded in order. Load shedding happens only after
+  decoding, where independent RGB frames can safely be replaced by newer ones.

@@ -65,38 +65,40 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 ## Getting Started
 
 ### Prerequisites
- - ESP-IDF v5.3.2
- - Python 3.8+
+ - ESP-IDF v5.4+
+ - Python 3.10
  - Jetson Nano (with JetPack SDK installed)
  - ESP32-P4-WIFI6
  - OV5647 camera module
 
 ### Installation
 
-- Install ESP-IDF v5.3.2:
+- Install ESP-IDF v5.4 or newer:
   - Visit Espressif's website: https://docs.espressif.com/projects/idf-im-ui/en/latest/
   - Follow Espressif's install guide for your system
-  - Make sure to choose **v5.3.2**
 
-- Build + flash the ESP32-P4 firmware:
+- Build and flash the ESP32-P4 firmware:
 
 ```bash
 git clone https://github.com/SJSU-CMPE-195/group-project-team-narm.git
 cd group-project-team-narm
-cd ov5647_capture
-
+cd esp32-p4
 idf.py set-target esp32p4
+idf.py menuconfig
 idf.py build
 idf.py -p <PORT> flash monitor
 ```
 
 - Set up the Jetson (Newton):
   - See `jetson-code/README.md`
+- Set up the ESP32-P4 camera sender:
+  - See `esp32-p4/README.md`
 
 ### Running the POC
-1. Power on the esp32 with the ov5647 camera connected via MIPI-CSI.
-2. Flash the firmware using 'idf.py flash' .
-3. The esp32 captures video, encodes it as h.264, and streams it over wifi.
+1. Power on the ESP32-P4-WIFI6 with the OV5647 connected via MIPI-CSI.
+2. Build and flash the firmware from `esp32-p4/`.
+3. The P4 captures video, hardware-encodes H.264, and streams it through its
+   ESP32-C6 Wi-Fi coprocessor.
 4. On the Jetson Nano, run the inference server to receive the stream and perform ASL translation.
 
 ### What's Next
