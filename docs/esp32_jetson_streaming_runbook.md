@@ -98,7 +98,7 @@ fully decoded RGB frames.
 
 Start with:
 
-- 1280x720 at 30 FPS
+- 1920x1080 at 30 FPS
 - 4 Mbps
 - I-frame period 30
 - QP range 25 to 35

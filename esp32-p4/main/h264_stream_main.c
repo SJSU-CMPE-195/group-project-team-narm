@@ -731,4 +731,11 @@ void app_main(void)
              CONFIG_EXAMPLE_FRAME_WIDTH, CONFIG_EXAMPLE_FRAME_HEIGHT,
              CONFIG_EXAMPLE_FRAME_FPS, CONFIG_EXAMPLE_JETSON_IP,
              CONFIG_EXAMPLE_JETSON_PORT);
+
+#if CONFIG_EXAMPLE_AUTOSTART_STREAM
+    s_stop_requested = false;
+    s_streaming = true;
+    xTaskNotifyGive(stream_handle);
+    ESP_LOGI(TAG, "auto-starting camera stream");
+#endif
 }

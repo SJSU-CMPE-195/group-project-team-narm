@@ -1,16 +1,19 @@
-# ESP32-P4 OV5647 H.264 Sender
+# ESP32-P4 OV5647 Camera Firmware
 
-This is the canonical glasses-camera firmware. It targets the
-**Waveshare ESP32-P4-WIFI6** with an **OV5647 MIPI-CSI camera**.
+This firmware targets the **Waveshare ESP32-P4-WIFI6** with an **OV5647
+MIPI-CSI camera**. Browser MJPEG streaming is enabled by default. The older
+Jetson H.264 sender remains available as an alternate build mode.
 
-The firmware captures YUV420 frames, uses the ESP32-P4 hardware H.264 encoder,
-and sends each complete encoded access unit to the Jetson using:
+## Browser mode
 
-    [4-byte big-endian payload length][H.264 access unit]
+The default firmware captures RGB565 frames, JPEG-encodes them with the P4
+hardware JPEG encoder, and serves an HTTP MJPEG stream:
 
-Capture/encoding and TCP transmission run in separate FreeRTOS tasks. Two
-MMAP'd encoder-output buffers absorb brief Wi-Fi stalls without copying or
-dropping dependent H.264 frames.
+    http://<esp32-ip>/
+    http://<esp32-ip>/stream
+
+Connect the ESP32-P4 and your laptop/phone to the same Wi-Fi network. The IP
+address and browser URL are printed by `idf.py monitor` after boot.
 
 ## Requirements
 
@@ -29,37 +32,41 @@ dropping dependent H.264 frames.
 Set these menu items:
 
 1. **Example Connection Configuration**
-   - Wi-Fi SSID and password for the Jetson hotspot/LAN (2.4 GHz).
-2. **H.264 Stream Example Configuration**
-   - Jetson IPv4 and TCP port.
-   - Stream button GPIO.
-   - Resolution, FPS, bitrate, GOP, and QP range.
+   - Wi-Fi SSID and password (2.4 GHz).
+2. **Camera Streaming Configuration**
+   - Keep **Serve browser MJPEG stream** enabled.
+   - Adjust HTTP port, JPEG quality, resolution, and FPS if needed.
 
 The checked-in defaults already select the Waveshare board's ESP32-C6 over
 4-bit SDIO, its GPIO wiring, 32 MB flash, 32 MB PSRAM at 200 MHz, the OV5647
-MIPI-CSI sensor, the ISP pipeline, and the ESP32-P4 hardware H.264 device.
+MIPI-CSI sensor, the ISP pipeline, and the ESP32-P4 hardware video support.
 
 The performance defaults are:
 
-- 1280x720
+- 1920x1080 capture
 - 30 FPS
-- 4 Mbps H.264
-- One I-frame every 30 frames
-- Four camera buffers and two encoded-output buffers
+- JPEG quality 70
+- Three camera buffers
 
 The driver prints the negotiated resolution at startup because the sensor may
 select the nearest supported mode.
 
 ## Build and flash
 
-Start the Jetson listener first, then:
-
     idf.py build
     idf.py -p <PORT> flash monitor
 
-Press the configured active-low button once to start streaming and again to
-stop. If TCP disconnects unexpectedly, the sender reconnects and starts a clean
-encoder session so the Jetson receives fresh SPS/PPS/IDR data.
+After the ESP32 joins Wi-Fi, open the printed URL in a browser.
+
+## Jetson H.264 mode
+
+To restore the original Jetson sender, open `idf.py menuconfig`, disable
+**Serve browser MJPEG stream**, and configure the Jetson IP, TCP port, H.264
+settings, and stream button under **Camera Streaming Configuration**.
+
+That mode sends each access unit as:
+
+    [4-byte big-endian payload length][H.264 access unit]
 
 ## Jetson command
 
@@ -69,7 +76,7 @@ From jetson-code:
     MODEL_PATH=/absolute/path/to/models/action.h5 \
     python3 main.py
 
-## Performance output
+## H.264 performance output
 
 Every five seconds the ESP prints:
 

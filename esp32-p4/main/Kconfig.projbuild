@@ -1,4 +1,44 @@
-menu "H.264 Stream Example Configuration"
+menu "Camera Streaming Configuration"
+
+    config EXAMPLE_BROWSER_MJPEG
+        bool "Serve browser MJPEG stream"
+        default y
+        help
+            Serve the camera as an HTTP MJPEG stream at /stream.
+            Open the device IP address in a web browser to view it.
+            Disable this option to build the Jetson H.264 TCP sender instead.
+
+    config EXAMPLE_HTTP_PORT
+        int "Browser HTTP port"
+        default 80
+        range 1 65535
+        depends on EXAMPLE_BROWSER_MJPEG
+        help
+            TCP port used by the browser MJPEG server.
+
+    config EXAMPLE_CAMERA_VIDEO_BUFFER_NUMBER
+        int "Browser camera buffer count"
+        default 3
+        range 2 4
+        depends on EXAMPLE_BROWSER_MJPEG
+        help
+            Number of MMAP camera buffers used by the browser stream.
+
+    config EXAMPLE_JPEG_COMPRESSION_QUALITY
+        int "Browser JPEG quality"
+        default 70
+        range 1 100
+        depends on EXAMPLE_BROWSER_MJPEG
+        help
+            JPEG quality for the browser MJPEG stream. Higher values improve
+            image quality but use more Wi-Fi bandwidth.
+
+    config EXAMPLE_HTTP_PART_BOUNDARY
+        string "MJPEG HTTP part boundary"
+        default "esp32p4frame"
+        depends on EXAMPLE_BROWSER_MJPEG
+        help
+            Boundary string separating JPEG frames in the HTTP stream.
 
     config EXAMPLE_JETSON_IP
         string "Jetson IP address"
@@ -20,9 +60,16 @@ menu "H.264 Stream Example Configuration"
             GPIO number for the button. First press = start stream, second press = stop.
             Assumed active-low (pulled up). Adjust button_task if your button is active-high.
 
+    config EXAMPLE_AUTOSTART_STREAM
+        bool "Start streaming automatically after Wi-Fi connects"
+        default y
+        help
+            Start the camera stream automatically after networking is ready.
+            The configured button can still stop and restart the stream.
+
     config EXAMPLE_FRAME_WIDTH
         int "Capture width"
-        default 1280
+        default 1920
         range 320 1920
         help
             Requested OV5647 capture width. The driver may select the nearest
@@ -30,18 +77,19 @@ menu "H.264 Stream Example Configuration"
 
     config EXAMPLE_FRAME_HEIGHT
         int "Capture height"
-        default 720
+        default 1080
         range 240 1080
         help
-            Requested OV5647 capture height.
+            Requested OV5647 capture height. The OV5647 configuration used by
+            this board supports 1920x1080 at 30 FPS.
 
     config EXAMPLE_FRAME_FPS
         int "Capture frame rate"
         default 30
         range 5 60
         help
-            Requested camera frame rate. The default is 720p30 for responsive
-            hand-motion capture without the cost of 1080p inference frames.
+            Requested camera frame rate. The OV5647 board configuration uses
+            1080p30; resize frames on the receiver if needed.
 
     config EXAMPLE_H264_I_PERIOD
         int "H.264 I-frame period (frames)"
@@ -55,8 +103,8 @@ menu "H.264 Stream Example Configuration"
         default 4000000
         range 250000 12000000
         help
-            Target bitrate for H.264 encoding. 4 Mbps is a practical 720p30
-            baseline for preserving hand and finger detail.
+            Target bitrate for H.264 encoding. 4 Mbps is a practical 1080p30
+            starting point for preserving hand and finger detail.
 
     config EXAMPLE_H264_MIN_QP
         int "H.264 minimum QP"
