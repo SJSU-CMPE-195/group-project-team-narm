@@ -33,9 +33,9 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 
 ## Demo
 
-[Link to demo video or GIF]
-
-**Live Demo:** [URL if deployed]
+**Live Demo:** 
+https://drive.google.com/file/d/1KT8tJLhU8_RAIu3LAAFUE22tZD822viF/view?usp=drive_link
+https://drive.google.com/file/d/14Ed6Ce-xtvRCOp3gI132woxyjiATuiI4/view?usp=drive_link
 
 ---
 
