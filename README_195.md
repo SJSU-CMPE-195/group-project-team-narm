@@ -1,6 +1,6 @@
 # Project Title
 
-Wearable ASL-to-speech glasses that translates ASL into English.
+Wearable device that translates ASL to English in real time.
 
 ## Team
 
@@ -27,7 +27,6 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 
 - Fully offline
 - Wearable factor
-- Feature 3
 
 ---
 
