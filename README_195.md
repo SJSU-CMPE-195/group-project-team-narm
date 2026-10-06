@@ -11,7 +11,7 @@ Wearable ASL-to-speech glasses that translates ASL into spoken audio
 | Name 3 | [@ajimenez8203](https://github.com/ajimenez8203)       | aaron.jimenez@sjsu.edu|
 | Name 4 | [@mkhantkk](https://github.com/mkhantkk)               | minkhant.koko@sjsu.edu|
 
-**Advisor:** [Kaikai Liu]
+**Advisor:** Kaikai Liu
 
 ---
 
