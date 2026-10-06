@@ -68,20 +68,26 @@ menu "Camera Streaming Configuration"
             The configured button can still stop and restart the stream.
 
     config EXAMPLE_FRAME_WIDTH
-        int "Capture width"
+        int "Frame width (browser output / H.264 capture)"
+        default 1280 if EXAMPLE_BROWSER_MJPEG
         default 1920
         range 320 1920
         help
-            Requested OV5647 capture width. The driver may select the nearest
-            supported mode; the negotiated dimensions are printed at startup.
+            In browser mode, this is the JPEG stream width. RGB565 camera
+            frames are resized before encoding if the sensor's active mode
+            is larger. Set 1280 for a 720p stream. Upscaling is not supported.
+            In H.264 mode, this is the requested camera capture width.
 
     config EXAMPLE_FRAME_HEIGHT
-        int "Capture height"
+        int "Frame height (browser output / H.264 capture)"
+        default 720 if EXAMPLE_BROWSER_MJPEG
         default 1080
         range 240 1080
         help
-            Requested OV5647 capture height. The OV5647 configuration used by
-            this board supports 1920x1080 at 30 FPS.
+            In browser mode, this is the JPEG stream height. Set 720 for a
+            720p stream. The OV5647 still captures in its active sensor mode,
+            normally 1920x1080 at 30 FPS, before resizing on the P4.
+            In H.264 mode, this is the requested camera capture height.
 
     config EXAMPLE_FRAME_FPS
         int "Capture frame rate"
@@ -89,7 +95,7 @@ menu "Camera Streaming Configuration"
         range 5 60
         help
             Requested camera frame rate. The OV5647 board configuration uses
-            1080p30; resize frames on the receiver if needed.
+            1080p30. This sets the camera rate, not measured stream throughput.
 
     config EXAMPLE_H264_I_PERIOD
         int "H.264 I-frame period (frames)"
@@ -144,6 +150,9 @@ menu "Camera Streaming Configuration"
         default 5
         range 1 60
         help
-            Reports encoded/sent FPS, bitrate, queue depth, and buffer age.
+            Browser mode logs measured sent FPS, average JPEG size, and
+            capture wait, resize, encode, and HTTP send times at this interval.
+            H.264 mode reports encoded/sent FPS, bitrate, queue depth, and
+            buffer age.
 
 endmenu

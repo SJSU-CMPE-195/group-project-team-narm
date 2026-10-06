@@ -6,8 +6,9 @@ Jetson H.264 sender remains available as an alternate build mode.
 
 ## Browser mode
 
-The default firmware captures RGB565 frames, JPEG-encodes them with the P4
-hardware JPEG encoder, and serves an HTTP MJPEG stream:
+The default firmware captures RGB565 frames at the sensor's native 1920x1080,
+resizes them to 1280x720 on the P4, JPEG-encodes them with the hardware JPEG
+encoder, and serves an HTTP MJPEG stream:
 
     http://<esp32-ip>/
     http://<esp32-ip>/stream
@@ -35,6 +36,8 @@ Set these menu items:
    - Wi-Fi SSID and password (2.4 GHz).
 2. **Camera Streaming Configuration**
    - Keep **Serve browser MJPEG stream** enabled.
+   - Set **Frame width (browser output / H.264 capture)** to **1280** and
+     **Frame height (browser output / H.264 capture)** to **720** for 720p.
    - Adjust HTTP port, JPEG quality, resolution, and FPS if needed.
 
 The checked-in defaults already select the Waveshare board's ESP32-C6 over
@@ -43,13 +46,37 @@ MIPI-CSI sensor, the ISP pipeline, and the ESP32-P4 hardware video support.
 
 The performance defaults are:
 
-- 1920x1080 capture
-- 30 FPS
+- 1920x1080 capture, resized to a 1280x720 MJPEG stream
+- 30 FPS camera configuration (measured stream FPS depends on throughput)
 - JPEG quality 70
 - Three camera buffers
+- 32 KiB TCP send buffer (uses more RAM while sending)
 
-The driver prints the negotiated resolution at startup because the sensor may
-select the nearest supported mode.
+Browser streaming disables Wi-Fi modem sleep, enables TCP_NODELAY, and sends
+the MJPEG boundary and part header together to reduce transport delays.
+Keeping Wi-Fi awake increases power use. At boot, the firmware logs the access
+point's RSSI/channel; stream startup logs the configured TCP send buffer size.
+The common 1920x1080-to-1280x720 resize uses a specialized 3:2 loop that keeps
+the same center-sampled pixels and full field of view as the general resizer.
+
+Existing `sdkconfig` settings take precedence over defaults. There is no need
+to run `set-target` again when this project is already targeting `esp32p4`;
+that command resets project configuration, including Wi-Fi credentials.
+
+The camera's capture dimensions and the JPEG output dimensions are logged
+separately. For 720p, expect `camera ready: 1920x1080 @ 30 fps` followed by
+`MJPEG output: 1280x720`. The nearest-neighbor resize samples the entire image
+without cropping, preserving the field of view when the aspect ratio matches.
+Matching the output dimensions to capture dimensions bypasses resizing.
+
+While a browser is streaming, `MJPEG stats` reports measured sent FPS,
+average JPEG size, and average wait/resize/encode/send times every five
+seconds. These are server throughput measurements, not browser display FPS.
+
+The resize helper can also be checked on a computer with GCC, from `esp32-p4`:
+
+    gcc -std=c11 -O2 -Wall -Wextra -Werror -I main main/rgb565_resize.c tests/test_rgb565_resize.c -o build/test_rgb565_resize.exe
+    ./build/test_rgb565_resize.exe
 
 ## Build and flash
 

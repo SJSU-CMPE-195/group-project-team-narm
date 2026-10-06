@@ -1,8 +1,9 @@
 /*
  * Direct browser stream for the Waveshare ESP32-P4-WIFI6 + OV5647.
  *
- * The camera produces an RGB565 frame through the ISP. The P4 JPEG encoder
- * converts each frame to JPEG, and the HTTP server exposes multipart MJPEG:
+ * The camera produces an RGB565 frame through the ISP. Frames are resized
+ * to the configured stream dimensions before P4 hardware JPEG encoding,
+ * and the HTTP server exposes multipart MJPEG:
  *
  *   http://<board-ip>/
  *   http://<board-ip>/stream
@@ -12,6 +13,7 @@
  */
 
 #include <stdbool.h>
+#include <errno.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -31,14 +33,19 @@
 #include "esp_event.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
 #include "nvs_flash.h"
+#include "lwip/sockets.h"
 
 #include "protocol_examples_common.h"
 #include "example_video_common.h"
 #include "esp_video_device.h"
 #include "linux/videodev2.h"
+#include "rgb565_resize.h"
 
 #define CAMERA_BUFFER_COUNT CONFIG_EXAMPLE_CAMERA_VIDEO_BUFFER_NUMBER
 #define HTTP_PORT            CONFIG_EXAMPLE_HTTP_PORT
@@ -48,19 +55,26 @@
 static const char *TAG = "browser_stream";
 
 static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" HTTP_BOUNDARY;
-static const char *STREAM_BOUNDARY = "\r\n--" HTTP_BOUNDARY "\r\n";
-static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %" PRIu32 "\r\n\r\n";
+static const char *STREAM_PART = "\r\n--" HTTP_BOUNDARY "\r\n"
+                               "Content-Type: image/jpeg\r\nContent-Length: %" PRIu32 "\r\n\r\n";
 
 typedef struct {
     int fd;
     uint32_t buffer_count;
     uint8_t *buffer[CAMERA_BUFFER_COUNT];
     size_t buffer_length[CAMERA_BUFFER_COUNT];
-    uint32_t buffer_size;
     uint32_t width;
     uint32_t height;
+    size_t stride;
     uint32_t pixel_format;
     uint32_t frame_rate;
+
+    uint32_t stream_width;
+    uint32_t stream_height;
+    uint16_t *resize_buffer;
+    uint32_t resize_buffer_size;
+    uint32_t *resize_columns;
+    size_t *resize_row_offsets;
 
     example_encoder_handle_t jpeg_encoder;
     uint8_t *jpeg_buffer;
@@ -100,6 +114,13 @@ static esp_err_t camera_cleanup(browser_camera_t *camera)
         camera->frame_lock = NULL;
     }
 
+    heap_caps_free(camera->resize_buffer);
+    heap_caps_free(camera->resize_columns);
+    heap_caps_free(camera->resize_row_offsets);
+    camera->resize_buffer = NULL;
+    camera->resize_columns = NULL;
+    camera->resize_row_offsets = NULL;
+
     if (camera->fd >= 0) {
         close(camera->fd);
         camera->fd = -1;
@@ -122,25 +143,67 @@ static esp_err_t camera_init(browser_camera_t *camera)
         return ESP_FAIL;
     }
 
-    /* RGB565 is supported by the P4 JPEG encoder on all supported P4 revisions. */
+    /* S_FMT only accepts the sensor's active dimensions. Read those first;
+     * CONFIG_EXAMPLE_FRAME_WIDTH/HEIGHT describe the JPEG output size. */
     format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    format.fmt.pix.width = CONFIG_EXAMPLE_FRAME_WIDTH;
-    format.fmt.pix.height = CONFIG_EXAMPLE_FRAME_HEIGHT;
+    if (ioctl(camera->fd, VIDIOC_G_FMT, &format) != 0) {
+        ret = ESP_FAIL;
+        ESP_LOGE(TAG, "failed to get camera format");
+        goto fail;
+    }
+
+    /* RGB565 is supported by the P4 JPEG encoder on all supported P4 revisions. */
     format.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
     format.fmt.pix.field = V4L2_FIELD_ANY;
     if (ioctl(camera->fd, VIDIOC_S_FMT, &format) != 0) {
         ESP_LOGW(TAG, "camera rejected RGB565 format; using its negotiated format");
-        memset(&format, 0, sizeof(format));
-        format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (ioctl(camera->fd, VIDIOC_G_FMT, &format) != 0) {
-            ESP_LOGE(TAG, "failed to get camera format");
-            return camera_cleanup(camera);
-        }
+    }
+    memset(&format, 0, sizeof(format));
+    format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(camera->fd, VIDIOC_G_FMT, &format) != 0) {
+        ret = ESP_FAIL;
+        ESP_LOGE(TAG, "failed to get negotiated camera format");
+        goto fail;
     }
 
     camera->width = format.fmt.pix.width;
     camera->height = format.fmt.pix.height;
     camera->pixel_format = format.fmt.pix.pixelformat;
+    camera->stride = format.fmt.pix.bytesperline;
+    camera->stream_width = CONFIG_EXAMPLE_FRAME_WIDTH;
+    camera->stream_height = CONFIG_EXAMPLE_FRAME_HEIGHT;
+
+    ESP_GOTO_ON_FALSE(camera->width && camera->height &&
+                      camera->stream_width <= camera->width &&
+                      camera->stream_height <= camera->height,
+                      ESP_ERR_INVALID_ARG, fail, TAG,
+                      "stream dimensions must fit within the camera frame");
+
+    bool resize = camera->stream_width != camera->width ||
+                  camera->stream_height != camera->height;
+    if (resize) {
+        ESP_GOTO_ON_FALSE(camera->pixel_format == V4L2_PIX_FMT_RGB565,
+                          ESP_ERR_NOT_SUPPORTED, fail, TAG,
+                          "resizing requires RGB565 camera output");
+        if (camera->stride == 0) {
+            camera->stride = camera->width * sizeof(uint16_t);
+        }
+        camera->resize_buffer_size = camera->stream_width * camera->stream_height * sizeof(uint16_t);
+        camera->resize_buffer = heap_caps_malloc(camera->resize_buffer_size,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        camera->resize_columns = heap_caps_malloc(camera->stream_width * sizeof(uint32_t),
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        camera->resize_row_offsets = heap_caps_malloc(camera->stream_height * sizeof(size_t),
+                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        ESP_GOTO_ON_FALSE(camera->resize_buffer && camera->resize_columns &&
+                          camera->resize_row_offsets, ESP_ERR_NO_MEM, fail, TAG,
+                          "failed to allocate RGB565 resize buffers");
+        ESP_GOTO_ON_FALSE(rgb565_resize_prepare(camera->width, camera->height,
+                                                camera->stride, camera->stream_width,
+                                                camera->stream_height, camera->resize_columns,
+                                                camera->resize_row_offsets),
+                          ESP_ERR_INVALID_ARG, fail, TAG, "invalid RGB565 resize dimensions/stride");
+    }
 
     streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     streamparm.parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
@@ -167,7 +230,8 @@ static esp_err_t camera_init(browser_camera_t *camera)
     if (ioctl(camera->fd, VIDIOC_REQBUFS, &request) != 0 || request.count < 2 ||
         request.count > CAMERA_BUFFER_COUNT) {
         ESP_LOGE(TAG, "failed to request camera buffers; count=%" PRIu32, request.count);
-        return camera_cleanup(camera);
+        ret = ESP_FAIL;
+        goto fail;
     }
     camera->buffer_count = request.count;
 
@@ -179,7 +243,15 @@ static esp_err_t camera_init(browser_camera_t *camera)
 
         if (ioctl(camera->fd, VIDIOC_QUERYBUF, &buffer) != 0) {
             ESP_LOGE(TAG, "failed to query camera buffer %" PRIu32, i);
-            return camera_cleanup(camera);
+            ret = ESP_FAIL;
+            goto fail;
+        }
+
+        if (resize) {
+            size_t required_size = (camera->height - 1) * camera->stride +
+                                   camera->width * sizeof(uint16_t);
+            ESP_GOTO_ON_FALSE(buffer.length >= required_size, ESP_ERR_INVALID_SIZE,
+                              fail, TAG, "camera buffer is too small for RGB565 resize");
         }
 
         camera->buffer_length[i] = buffer.length;
@@ -188,27 +260,26 @@ static esp_err_t camera_init(browser_camera_t *camera)
         if (camera->buffer[i] == MAP_FAILED) {
             camera->buffer[i] = NULL;
             ESP_LOGE(TAG, "failed to map camera buffer %" PRIu32, i);
-            return camera_cleanup(camera);
+            ret = ESP_FAIL;
+            goto fail;
         }
-        camera->buffer_size = buffer.length;
 
         if (ioctl(camera->fd, VIDIOC_QBUF, &buffer) != 0) {
             ESP_LOGE(TAG, "failed to queue camera buffer %" PRIu32, i);
-            return camera_cleanup(camera);
+            ret = ESP_FAIL;
+            goto fail;
         }
     }
 
     if (camera->pixel_format != V4L2_PIX_FMT_JPEG) {
         example_encoder_config_t encoder_config = {
-            .width = camera->width,
-            .height = camera->height,
+            .width = camera->stream_width,
+            .height = camera->stream_height,
             .pixel_format = camera->pixel_format,
             .quality = JPEG_QUALITY,
         };
-        if (example_encoder_init(&encoder_config, &camera->jpeg_encoder) != ESP_OK) {
-            ESP_LOGE(TAG, "failed to initialize JPEG encoder");
-            goto fail;
-        }
+        ESP_GOTO_ON_ERROR(example_encoder_init(&encoder_config, &camera->jpeg_encoder),
+                          fail, TAG, "failed to initialize JPEG encoder");
         ESP_GOTO_ON_ERROR(example_encoder_alloc_output_buffer(camera->jpeg_encoder,
                                                               &camera->jpeg_buffer,
                                                               &camera->jpeg_buffer_size),
@@ -232,6 +303,9 @@ static esp_err_t camera_init(browser_camera_t *camera)
     ESP_LOGI(TAG, "camera ready: %" PRIu32 "x%" PRIu32 " @ %" PRIu32
              " fps, pixel format=0x%08" PRIx32, camera->width, camera->height,
              camera->frame_rate, camera->pixel_format);
+    ESP_LOGI(TAG, "MJPEG output: %" PRIu32 "x%" PRIu32 ", JPEG quality=%d, resize=%s",
+             camera->stream_width, camera->stream_height, JPEG_QUALITY,
+             resize ? "RGB565 nearest-neighbor" : "none");
     return ESP_OK;
 
 fail:
@@ -266,11 +340,28 @@ static esp_err_t stream_handler(httpd_req_t *request)
     httpd_resp_set_hdr(request, "Pragma", "no-cache");
     httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
 
+    /* MJPEG/HTTP chunk framing contains small writes. Avoid Nagle waiting
+     * for acknowledgements before sending the next header or JPEG. */
+    int no_delay = 1;
+    int socket_fd = httpd_req_to_sockfd(request);
+    if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay)) != 0) {
+        ESP_LOGW(TAG, "could not enable TCP_NODELAY: errno=%d", errno);
+    } else {
+        ESP_LOGI(TAG, "MJPEG TCP_NODELAY enabled, send buffer=%d bytes",
+                 CONFIG_LWIP_TCP_SND_BUF_DEFAULT);
+    }
+
+    int64_t stats_started = esp_timer_get_time();
+    uint32_t sent_frames = 0;
+    uint64_t sent_bytes = 0;
+    int64_t wait_us = 0, resize_us = 0, encode_us = 0, send_us = 0;
+
     while (true) {
         struct v4l2_buffer buffer = { 0 };
         uint8_t *jpeg_data = NULL;
         uint32_t jpeg_size = 0;
         bool locked = false;
+        int64_t frame_started = esp_timer_get_time();
 
         buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buffer.memory = V4L2_MEMORY_MMAP;
@@ -285,13 +376,26 @@ static esp_err_t stream_handler(httpd_req_t *request)
         }
         locked = true;
 
+        int64_t frame_ready = esp_timer_get_time();
+        int64_t resized_at = frame_ready;
+        int64_t encoded_at = frame_ready;
+
         if (camera->pixel_format == V4L2_PIX_FMT_JPEG) {
             jpeg_data = camera->buffer[buffer.index];
             jpeg_size = buffer.bytesused;
         } else {
+            uint8_t *encoder_input = camera->buffer[buffer.index];
+            uint32_t encoder_input_size = camera->buffer_length[buffer.index];
+            if (camera->resize_buffer != NULL) {
+                rgb565_resize_frame(encoder_input, camera->resize_buffer,
+                                     camera->width, camera->stream_width, camera->stream_height,
+                                     camera->resize_columns, camera->resize_row_offsets);
+                encoder_input = (uint8_t *)camera->resize_buffer;
+                encoder_input_size = camera->resize_buffer_size;
+            }
+            resized_at = esp_timer_get_time();
             ret = example_encoder_process(camera->jpeg_encoder,
-                                          camera->buffer[buffer.index],
-                                          camera->buffer_size,
+                                          encoder_input, encoder_input_size,
                                           camera->jpeg_buffer,
                                           camera->jpeg_buffer_size,
                                           &jpeg_size);
@@ -299,14 +403,11 @@ static esp_err_t stream_handler(httpd_req_t *request)
                 ESP_LOGW(TAG, "JPEG encoding failed: %s", esp_err_to_name(ret));
                 goto frame_done;
             }
+            encoded_at = esp_timer_get_time();
             jpeg_data = camera->jpeg_buffer;
         }
 
-        ret = httpd_resp_send_chunk(request, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-        if (ret != ESP_OK) {
-            goto frame_done;
-        }
-
+        /* Send the boundary and part header together, reducing tiny writes. */
         int header_len = snprintf(part_header, sizeof(part_header), STREAM_PART, jpeg_size);
         if (header_len <= 0 || header_len >= (int)sizeof(part_header)) {
             ret = ESP_FAIL;
@@ -321,6 +422,29 @@ static esp_err_t stream_handler(httpd_req_t *request)
             goto frame_done;
         }
         ret = httpd_resp_send_chunk(request, "\r\n", 2);
+        if (ret == ESP_OK) {
+            int64_t sent_at = esp_timer_get_time();
+            ++sent_frames;
+            sent_bytes += jpeg_size;
+            wait_us += frame_ready - frame_started;
+            resize_us += resized_at - frame_ready;
+            encode_us += encoded_at - resized_at;
+            send_us += sent_at - encoded_at;
+
+            if (sent_at - stats_started >= CONFIG_EXAMPLE_STATS_INTERVAL_SEC * 1000000LL) {
+                ESP_LOGI(TAG, "MJPEG stats: %" PRIu32 "x%" PRIu32 " sent=%" PRIu32
+                         " fps=%.1f avg_jpeg=%.1f KiB wait=%.1f resize=%.1f encode=%.1f send=%.1f ms",
+                         camera->stream_width, camera->stream_height, sent_frames,
+                         sent_frames * 1000000.0 / (sent_at - stats_started),
+                         (double)sent_bytes / sent_frames / 1024.0,
+                         wait_us / (sent_frames * 1000.0), resize_us / (sent_frames * 1000.0),
+                         encode_us / (sent_frames * 1000.0), send_us / (sent_frames * 1000.0));
+                stats_started = sent_at;
+                sent_frames = 0;
+                sent_bytes = 0;
+                wait_us = resize_us = encode_us = send_us = 0;
+            }
+        }
 
 frame_done:
         if (locked) {
@@ -367,6 +491,24 @@ static esp_err_t http_server_start(void)
     return ESP_OK;
 }
 
+static void configure_stream_wifi(void)
+{
+#if CONFIG_EXAMPLE_CONNECT_WIFI
+    /* Low-latency streaming favors keeping the radio awake over power saving. */
+    esp_err_t ret = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "could not disable Wi-Fi power saving: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi power saving disabled for streaming");
+    }
+
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi link: RSSI=%d dBm, channel=%u", ap_info.rssi, ap_info.primary);
+    }
+#endif
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -381,6 +523,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(example_connect());
+    configure_stream_wifi();
     ESP_ERROR_CHECK(camera_init(&s_camera));
     ESP_ERROR_CHECK(http_server_start());
 
