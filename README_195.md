@@ -1,6 +1,6 @@
 # Project Title
 
-Wearable ASL-to-speech glasses that translates ASL into spoken audio
+Wearable ASL-to-speech glasses that translates ASL into English.
 
 ## Team
 
