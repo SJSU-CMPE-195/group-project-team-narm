@@ -1,6 +1,6 @@
 # Project Title
 
-Wearable ASL-to-speech glasses that translates ASL into spoken audio
+Wearable device that translates ASL to English in real time.
 
 ## Team
 
@@ -11,7 +11,7 @@ Wearable ASL-to-speech glasses that translates ASL into spoken audio
 | Name 3 | [@ajimenez8203](https://github.com/ajimenez8203)       | aaron.jimenez@sjsu.edu|
 | Name 4 | [@mkhantkk](https://github.com/mkhantkk)               | minkhant.koko@sjsu.edu|
 
-**Advisor:** [Kaikai Liu]
+**Advisor:** Kaikai Liu
 
 ---
 
@@ -27,15 +27,13 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 
 - Fully offline
 - Wearable factor
-- Feature 3
 
 ---
 
 ## Demo
 
-[Link to demo video or GIF]
-
-**Live Demo:** [URL if deployed]
+#### Trial 1: https://drive.google.com/file/d/1KT8tJLhU8_RAIu3LAAFUE22tZD822viF/view?usp=drive_link
+#### Trial 2: https://drive.google.com/file/d/14Ed6Ce-xtvRCOp3gI132woxyjiATuiI4/view?usp=drive_link
 
 ---
 
