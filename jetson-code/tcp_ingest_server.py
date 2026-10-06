@@ -1,4 +1,3 @@
-import os
 import socket
 import struct
 import threading
@@ -8,9 +7,10 @@ from typing import Callable, Optional
 
 
 @dataclass(frozen=True)
-class PayloadFrame:
+class H264Frame:
     payload: bytes
     received_ts: float
+    stream_id: int = 0
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -30,13 +30,15 @@ class TCPIngestServer:
         self,
         host: str = "0.0.0.0",
         port: int = 5000,
-        on_frame: Optional[Callable[[PayloadFrame], None]] = None,
+        on_frame: Optional[Callable[[H264Frame], None]] = None,
         backlog: int = 1,
+        max_payload_bytes: int = 8 * 1024 * 1024,
     ):
         self.host = host
         self.port = port
         self.on_frame = on_frame
         self.backlog = backlog
+        self.max_payload_bytes = max_payload_bytes
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -48,6 +50,7 @@ class TCPIngestServer:
             s.bind((self.host, self.port))
             s.listen(self.backlog)
             print(f"[tcp] listening on {self.host}:{self.port}")
+            stream_id = 0
 
             while not self._stop.is_set():
                 try:
@@ -57,62 +60,32 @@ class TCPIngestServer:
                     continue
 
                 with client:
+                    stream_id += 1
                     print(f"[tcp] client connected: {addr}")
-                    try:
-                        client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    except OSError:
-                        pass
-                    try:
-                        rcvbuf = int(os.environ.get("TCP_RCVBUF_BYTES", "524288"))
-                        if rcvbuf > 0:
-                            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-                    except OSError:
-                        pass
-                    # Blocking reads for framing — avoids partial timeouts desynchronizing [len][payload].
-                    client.settimeout(None)
+                    client.settimeout(10.0)
                     while not self._stop.is_set():
                         try:
                             header = _recv_exact(client, 4)
                             (length,) = struct.unpack(">I", header)
                             if length == 0:
                                 continue
+                            if length > self.max_payload_bytes:
+                                raise ConnectionError(
+                                    f"payload length {length} exceeds limit "
+                                    f"{self.max_payload_bytes}"
+                                )
                             payload = _recv_exact(client, length)
                             if self.on_frame:
-                                self.on_frame(PayloadFrame(payload=payload, received_ts=time.time()))
-                        except ConnectionError as e:
+                                self.on_frame(
+                                    PayloadFrame(
+                                        payload=payload,
+                                        received_ts=time.monotonic(),
+                                        stream_id=stream_id,
+                                    )
+                                )
+                        except (ConnectionError, OSError) as e:
                             print(f"[tcp] disconnected: {e}")
                             break
-
-
-def _jpeg_saver(out_dir: str = "frames", every_n: int = 1) -> Callable[[PayloadFrame], None]:
-    """
-    Simple test callback: saves incoming payloads as JPEG files.
-    Assumes ESP is sending JPEG frames (your current firmware does).
-    """
-    import os
-
-    os.makedirs(out_dir, exist_ok=True)
-    counter = {"i": 0}
-
-    def on_frame(frame: PayloadFrame) -> None:
-        counter["i"] += 1
-        if every_n > 1 and (counter["i"] % every_n) != 0:
-            return
-        ts_ms = int(frame.received_ts * 1000)
-        path = os.path.join(out_dir, f"frame_{ts_ms}_{counter['i']:06d}.jpg")
-        with open(path, "wb") as f:
-            f.write(frame.payload)
-        if (counter["i"] % 30) == 0:
-            print(f"[tcp] saved {counter['i']} frames (latest: {path})")
-
-    return on_frame
-
-
-if __name__ == "__main__":
-    # Usage:
-    #   python tcp_ingest_server.py
-    #
-    # It will save JPEGs into ./frames so you can quickly confirm the OV5647 works.
-    server = TCPIngestServer(port=5000, on_frame=_jpeg_saver(out_dir="frames", every_n=1))
-    server.serve_forever()
+                        except socket.timeout:
+                            continue
 

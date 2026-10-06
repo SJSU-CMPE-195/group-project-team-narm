@@ -1,133 +1,135 @@
-# ESP32 -> Jetson Streaming Runbook (JPEG over TCP)
+# ESP32-P4 to Jetson Streaming Runbook
 
-This runbook is the canonical bring-up sequence for the current default path:
+This is the canonical bring-up path:
 
-- ESP32 firmware: `ov5647_capture` in TCP mode
-- Jetson receiver: `jetson-code/main.py` with `PAYLOAD_FORMAT=jpeg` (default)
-- Framing protocol: `[len:u32be][jpeg_payload]...`
+- Camera: OV5647 over MIPI-CSI
+- Sender: Waveshare ESP32-P4-WIFI6 in esp32-p4
+- Codec: ESP32-P4 hardware H.264
+- Transport: TCP through the board's ESP32-C6 Wi-Fi coprocessor
+- Framing: 4-byte big-endian length followed by one H.264 access unit
+- Receiver: jetson-code/main.py with PAYLOAD_FORMAT=h264
 
-## 1) Configure ESP32 firmware
+The previous XIAO ESP32-S3 JPEG firmware remains in ov5647_capture only as
+legacy reference and is not the project target.
 
-### 1.1 Set Jetson endpoint
+## 1. Configure the Jetson network
 
-Edit `ov5647_capture/main/ov5647_capture.c`:
+ESP32-P4 and Jetson must be on the same LAN. For an offline demo, the Jetson can
+host a NetworkManager hotspot:
 
-- `JETSON_TCP_IP` = Jetson hotspot/LAN IPv4 (e.g. `10.42.0.1`)
-- `JETSON_TCP_PORT` = `5000`
+    nmcli device status
+    sudo nmcli device wifi hotspot ifname IFACE con-name ASLHotspot \
+      ssid ASLHotspot password 'YourStrongPassphrase'
+    ip -4 addr show dev IFACE
 
-### 1.2 Set Wi-Fi credentials locally (do not commit real secrets)
+The hotspot address is commonly 10.42.0.1, but use the address actually shown.
 
-```bash
-cd ov5647_capture
-idf.py menuconfig
-```
+## 2. Start the Jetson receiver first
 
-Open:
+Inside the prepared Jetson container:
 
-- `TCP streaming Wi-Fi (ESP32-S3 STA)`
+    cd /workspace/group-project-team-narm/jetson-code
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    PAYLOAD_FORMAT=h264 \
+    MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+    PREVIEW_HTTP=1 \
+    python3 main.py
 
-Set:
+Expected output:
 
-- `Remote Wi-Fi SSID`
-- `Remote Wi-Fi Password`
-- `Remote Wi-Fi maximum retry count`
+    [tcp] listening on 0.0.0.0:5000
+    [main] listening 0.0.0.0:5000, payload=h264, ...
 
-After saving and rebuilding, you can verify resolved values in:
+Confirm the port if necessary:
 
-- `ov5647_capture/build/config/sdkconfig.json`
+    ss -ltnp | grep ':5000'
 
-## 2) Start Jetson listener first
+## 3. Configure the ESP32-P4
 
-### 2.1 Full pipeline
+Use ESP-IDF 5.4 or newer:
 
-```bash
-cd jetson-code
-MODEL_PATH=/absolute/path/to/jetson-code/models/action.h5 python3 main.py
-```
+    cd esp32-p4
+    idf.py set-target esp32p4
+    idf.py menuconfig
 
-Expected startup logs:
+Configure:
 
-- `[tcp] listening on 0.0.0.0:5000`
-- `[main] listening 0.0.0.0:5000`
+- Example Connection Configuration: Jetson hotspot/LAN SSID and password.
+- Example Video Initialization Configuration: custom board, MIPI-CSI, OV5647,
+  and the Waveshare board's SCCB/control settings.
+- H.264 Stream Example Configuration: Jetson IP, port 5000, button GPIO,
+  resolution, FPS, bitrate, GOP, and QP range.
 
-### 2.2 Confirm port is open
+Do not commit real Wi-Fi credentials.
 
-```bash
-ss -ltnp | grep ':5000'
-```
+## 4. Build, flash, and start
 
-Expected:
+    idf.py build
+    idf.py -p <PORT> flash monitor
 
-- `LISTEN ... 0.0.0.0:5000 ... users:(("python3",...))`
+Press the configured stream button. Expected ESP logs:
 
-## 3) Build/flash ESP32
+    connected to Jetson at 10.42.0.1:5000
+    video started
+    stats: encoded=... sent=... fps=... bitrate=... queue=... age=...ms
 
-```bash
-cd ov5647_capture
-idf.py set-target esp32s3
-idf.py build
-idf.py -p <PORT> flash monitor
-```
+Expected Jetson logs:
 
-## 4) Expected healthy runtime signals
+    [tcp] client connected: (...)
+    [stats] rx=... decode=... infer=... latency=...ms
+    [gloss] <label> (conf=...)
 
-### Jetson
+## 5. Interpret performance counters
 
-- `[tcp] client connected: (...)`
-- payload decode/inference activity
-- eventual `[gloss] ...` lines once sequence/stability thresholds are met
+| Observation | Likely bottleneck |
+| --- | --- |
+| ESP encoded FPS below target | OV5647 mode, ISP, encoder, or camera configuration |
+| ESP queue/age keeps increasing | Wi-Fi or TCP throughput |
+| Jetson receive FPS below ESP sent FPS | Network or receiver backpressure |
+| Jetson decode FPS below receive FPS | H.264 decoder |
+| Decode FPS is healthy but inference FPS is low | MediaPipe or LSTM inference |
+| Decoded-drop count rises | Inference is slower than video; latency remains bounded |
 
-### ESP32
+The Jetson intentionally applies TCP backpressure before H.264 decoding. It
+never discards compressed P-frames. When inference falls behind, it drops only
+fully decoded RGB frames.
 
-- Wi-Fi association succeeds (no retry exhaustion)
-- TCP connect succeeds
-- periodic camera fps/bitrate logs
+## 6. Baseline tuning
 
-## 5) Failure map (quick diagnosis)
+Start with:
 
-### A) `Wi-Fi retry connect (attempt ...)` then `Wi-Fi failed to connect`
+- 1920x1080 at 30 FPS
+- 4 Mbps
+- I-frame period 30
+- QP range 25 to 35
 
-Cause:
+If hand/finger detail is insufficient, increase bitrate before increasing
+resolution. If inference is slow, resize/crop on the Jetson or reduce capture
+resolution while keeping 30 FPS.
 
-- ESP32 did not join AP.
+## Troubleshooting
 
-Check:
+### ESP cannot join Wi-Fi
 
-- SSID/password in menuconfig
-- AP is active and 2.4 GHz capable
-- credentials were reflashed after change
+- Verify SSID/password in menuconfig.
+- Use a 2.4 GHz-capable hotspot.
+- Rebuild and flash after changing credentials.
 
-### B) `TCP connect failed, retrying...`
+### TCP repeatedly reconnects
 
-Cause:
+- Confirm the Jetson IP and port.
+- Start main.py before pressing the stream button.
+- Check firewall rules and the ESP TCP send-timeout setting.
 
-- Wi-Fi connected but Jetson endpoint unreachable/not listening/wrong IP.
+### H.264 decoder errors after connect
 
-Check:
+- Confirm PAYLOAD_FORMAT=h264.
+- Keep the I-frame period near 30 while debugging.
+- Verify the sender starts a fresh encoder session after reconnect.
+- Do not add queue logic that discards encoded access units.
 
-- `JETSON_TCP_IP` matches Jetson `ip -4 addr` on the AP/LAN interface
-- Jetson `main.py` is running before ESP32 starts
-- `ss -ltnp | grep ':5000'` shows python listening
+### Camera or encoder fails to start
 
-### C) Repeated `cam_hal: FB-OVF`
-
-Cause:
-
-- Camera buffers overflow while network path is blocked or too slow.
-
-Check:
-
-- resolve TCP connectivity first
-- if still present under healthy link, reduce stream load (FPS and/or JPEG quality/resolution)
-
-### D) `cam_hal: NO-SOI - JPEG start marker missing` (sporadic)
-
-Cause:
-
-- bad/corrupted frame from capture path; often intermittent.
-
-Check:
-
-- camera ribbon seating, stable power, conservative camera settings
-- treat as secondary unless persistent/high-rate
-
+- Verify OV5647 ribbon orientation and power.
+- Confirm the MIPI-CSI/SCCB configuration against the Waveshare schematic.
+- Confirm the P4 hardware H.264 device is enabled in sdkconfig.

@@ -68,12 +68,6 @@ def main() -> None:
         conn, addr = srv.accept()
         print(f"[tcp] client connected: {addr}", flush=True)
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        try:
-            rcvbuf = int(os.environ.get("TCP_RCVBUF_BYTES", "524288"))
-            if rcvbuf > 0:
-                conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
-        except OSError:
-            pass
         stats = Stats()
 
         try:

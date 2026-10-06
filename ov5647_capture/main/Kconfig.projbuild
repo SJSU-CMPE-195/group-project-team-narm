@@ -1,12 +1,12 @@
-menu "TCP streaming Wi-Fi (ESP32-S3 STA)"
+menu "OV5647 streaming Wi-Fi configuration"
 
 config ESP_WIFI_REMOTE_SSID
     string "Remote Wi-Fi SSID"
-    default "YOUR_SSID"
+    default "myssid"
 
 config ESP_WIFI_REMOTE_PASSWORD
     string "Remote Wi-Fi Password"
-    default "YOUR_PASSWORD"
+    default "mypassword"
 
 config ESP_WIFI_REMOTE_MAX_RETRIES
     int "Remote Wi-Fi maximum retry count"

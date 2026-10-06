@@ -11,14 +11,16 @@ Single TCP connection. Repeated messages:
 
 ### Payload format options
 
-- **JPEG frames (default for `main.py`)**: payload is one full JPEG frame (JFIF/EXIF bytes). This matches the ESP‑IDF sender in `ov5647_capture/main/ov5647_capture.c` when `ENABLE_TCP_STREAM` is enabled.
-- **H.264 access units (legacy path)**: payload is one H.264 access unit (AU)
+- **H.264 access units (default)**: one complete access unit from the
+  ESP32-P4 hardware encoder. This is the canonical project path.
+- **JPEG frames (legacy/testing)**: one independent JPEG frame from the older
+  XIAO ESP32-S3 or Raspberry Pi sender.
 
-The ESP32 firmware determines which payload format is sent. The receiver must match (`PAYLOAD_FORMAT=jpeg` vs `h264` on the Jetson).
+The ESP32 firmware determines which payload format is sent. The receiver must match.
 
 ## Pipeline overview
 
-ESP32 sends length-prefixed frames over TCP. The receiver decodes each payload (**JPEG** or **H.264** depending on `PAYLOAD_FORMAT`), runs MediaPipe Holistic for keypoints, runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
+ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, runs MediaPipe Holistic for keypoints, runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
 
 Until the ESP32 connects and sends frames, `main.py` blocks waiting on an internal queue—no `[gloss]` lines will appear.
 
@@ -271,9 +273,9 @@ nmcli connection delete ASLHotspot
 
 ### ESP32 project settings (must match the network above)
 
-In the ESP-IDF project under **`ov5647_capture/`** (repo root):
+In the ESP-IDF project under **`esp32-p4/`** (repo root):
 
-**1. `sdkconfig`** (or `idf.py menuconfig` → **OV5647 streaming Wi‑Fi configuration**)
+**1. `idf.py menuconfig` → Example Connection Configuration**
 
 Use the **same** SSID and WPA passphrase as the Wi‑Fi the glasses join (e.g. the hotspot):
 
@@ -282,20 +284,18 @@ CONFIG_ESP_WIFI_REMOTE_SSID="ASLHotspot"
 CONFIG_ESP_WIFI_REMOTE_PASSWORD="YourStrongPassphrase"
 ```
 
-**2. `ov5647_capture/main/ov5647_capture.c`**
+**2. `idf.py menuconfig` → H.264 Stream Example Configuration**
 
 Point the TCP client at the receiver IP and port (example for a typical NetworkManager hotspot gateway):
 
-```c
-#define JETSON_TCP_IP "10.42.0.1"
-#define JETSON_TCP_PORT 5000
-```
+Set the Jetson IP address to `10.42.0.1` and TCP port to `5000`.
 
 Use the **actual** IPv4 from `ip -4 addr` on the AP interface if it differs.
 
-**3. Firmware mode (`ENABLE_TCP_STREAM` / `ENABLE_WEB_PREVIEW`)**
+**3. Camera/codec mode**
 
-The repo defaults to **`ENABLE_TCP_STREAM 1`** and **`ENABLE_WEB_PREVIEW 0`**: STA Wi‑Fi + **TCP JPEG** to the Jetson (`[len:u32be][jpeg]` per frame). Set **`ENABLE_WEB_PREVIEW 1`** (and **`ENABLE_TCP_STREAM 0`**) only when you want the onboard SoftAP browser demo (`http://192.168.4.1/stream`), which does **not** feed the Jetson TCP ingest.
+The canonical firmware always uses the OV5647 MIPI-CSI camera and P4 hardware
+H.264 encoder. Configure resolution, FPS, bitrate, GOP, and QP in menuconfig.
 
 Rebuild and flash the firmware after changing these values.
 
@@ -313,7 +313,12 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 
 - **`HOST`** (default `0.0.0.0`)
 - **`PORT`** (default `5000`)
-- **`PAYLOAD_FORMAT`** (`jpeg` or `h264`; default **`jpeg`** for the TCP‑JPEG firmware in `ov5647_capture/`)
+- **`PAYLOAD_FORMAT`** (`h264` or `jpeg`; default **`h264`**)
+- **`PAYLOAD_QUEUE_SIZE`** (default `64`) — ordered compressed-payload queue;
+  H.264 input applies TCP backpressure instead of dropping access units
+- **`DECODED_QUEUE_SIZE`** (default `2`) — latest decoded RGB frames retained
+  for inference
+- **`STATS_INTERVAL_SEC`** (default `5`) — pipeline performance log interval
 - **`TCP_RCVBUF_BYTES`** (default `524288`) — optional larger TCP receive buffer for the ingest socket (`tcp_ingest_server.py`, `decode_jpeg_tcp.py`)
 - **`PREVIEW_HTTP`** (default `0`) — if `1`, start a local MJPEG preview server (browser view of the decoded stream)
 - **`PREVIEW_PORT`** (default `8000`) — port for the MJPEG preview server
@@ -330,11 +335,12 @@ From `jetson-code/`:
 ```bash
 cd /workspace/group-project-team-narm/jetson-code
 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+PAYLOAD_FORMAT=h264 \
 MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
 python3 main.py
 ```
 
-The process **does not exit** on its own: it listens for TCP and blocks on an internal queue until framed video payloads arrive. **Ctrl+C** may interrupt while waiting (e.g. `KeyboardInterrupt` in `queue.get`)—expected when stopping the server.
+The process **does not exit** on its own: it listens for TCP and blocks on an internal queue until H.264 payloads arrive. **Ctrl+C** may interrupt while waiting (e.g. `KeyboardInterrupt` in `queue.get`)—expected when stopping the server.
 
 ## Live preview (browser / MJPEG, offline-friendly)
 
@@ -414,10 +420,12 @@ You may see **non-fatal** messages such as:
 | `libGL.so.1` missing | Prefer `opencv-python-headless==4.10.0.84` instead of full `opencv-python`, or install `libgl1`. |
 | MediaPipe + protobuf errors with TF 2.21 | Use **TF 2.15.1** + **protobuf 4.25.9** stack documented here; do not mix TF 2.21 + protobuf 6 with MediaPipe 0.10.x in one env. |
 | `import tensorflow` fails with protobuf `_message` / “Selected implementation cpp is not available” | Set `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` (one-off prefix or add `export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` to `~/.bashrc` inside the container). |
-| No gloss output, terminal looks idle | Expected until the ESP32 connects and sends length‑prefixed **JPEG** (default) or **H.264** payloads matching `PAYLOAD_FORMAT`. |
+| No gloss output, terminal looks idle | Expected until the ESP32 connects and sends length-prefixed H.264 matching `PAYLOAD_FORMAT=h264`. |
 | Browser preview doesn't load | Ensure you started with `PREVIEW_HTTP=1` and you are browsing to the Jetson's correct IP/port (hotspot often `10.42.0.1:8000`). |
 
 ## Notes
 
 - This PoC prints stable predicted gloss tokens to stdout (no gloss→sentence and no TTS).
 - The TCP stream protocol is length‑prefixed frames: `[len:u32be][payload]*` (JPEG or H.264 depending on firmware / `PAYLOAD_FORMAT`).
+- H.264 payloads are always decoded in order. Load shedding happens only after
+  decoding, where independent RGB frames can safely be replaced by newer ones.

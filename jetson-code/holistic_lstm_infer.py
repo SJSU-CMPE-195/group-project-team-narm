@@ -67,7 +67,6 @@ class HolisticLSTMInfer:
         self._holistic = self._mp_holistic.Holistic(
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
-            model_complexity=0,
         )
 
         self._sequence: List[np.ndarray] = []
@@ -82,7 +81,9 @@ class HolisticLSTMInfer:
 
     def _predict(self, sequence: List[np.ndarray]) -> Tuple[int, float, np.ndarray]:
         x = np.expand_dims(np.array(sequence, dtype=np.float32), axis=0)  # (1, T, 1662)
-        res = self.model.predict(x, verbose=0)[0]
+        # Direct eager invocation avoids Keras predict()'s per-call data adapter.
+        output = self.model(x, training=False)
+        res = np.asarray(output)[0]
         idx = int(np.argmax(res))
         conf = float(res[idx])
         return idx, conf, res
