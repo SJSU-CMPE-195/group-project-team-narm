@@ -258,7 +258,8 @@ void app_main(void) {
   jpeg_encoder_handle_t jpeg_enc = NULL;
   jpeg_encode_engine_cfg_t jpeg_eng_cfg = {
       .intr_priority = 0,
-      // If encoding ever stalls, we want to drop frames rather than block capture forever.
+      // If encoding ever stalls, we want to drop frames rather than block
+      // capture forever.
       .timeout_ms = 200,
   };
   ESP_ERROR_CHECK(jpeg_new_encoder_engine(&jpeg_eng_cfg, &jpeg_enc));
@@ -273,7 +274,8 @@ void app_main(void) {
 
   // JPEG size varies; allocate a generous PSRAM output buffer.
   // Rule of thumb: allow up to ~1 byte/pixel at moderate quality.
-  // (Keep headroom: encoder may not always error cleanly when outbuf too small.)
+  // (Keep headroom: encoder may not always error cleanly when outbuf too
+  // small.)
   const size_t jpeg_out_cap = (size_t)CAM_WIDTH * (size_t)CAM_HEIGHT * 2;
   uint8_t *jpeg_out_buf = heap_caps_malloc(jpeg_out_cap, MALLOC_CAP_SPIRAM);
   assert(jpeg_out_buf != NULL);
@@ -336,10 +338,9 @@ void app_main(void) {
       }
 
       uint32_t jpeg_len = 0;
-      esp_err_t jpeg_ret =
-          jpeg_encoder_process(jpeg_enc, &jpeg_cfg, frame_buf,
-                               (uint32_t)yuv_buf_size, jpeg_out_buf,
-                               (uint32_t)jpeg_out_cap, &jpeg_len);
+      esp_err_t jpeg_ret = jpeg_encoder_process(
+          jpeg_enc, &jpeg_cfg, frame_buf, (uint32_t)yuv_buf_size, jpeg_out_buf,
+          (uint32_t)jpeg_out_cap, &jpeg_len);
       if (jpeg_ret != ESP_OK || jpeg_len == 0) {
         ESP_LOGW(TAG, "JPEG encode failed: 0x%x len=%u", (unsigned)jpeg_ret,
                  (unsigned)jpeg_len);
