@@ -1,12 +1,48 @@
 # ESP32-P4 OV5647 Camera Firmware
 
 This firmware targets the **Waveshare ESP32-P4-WIFI6** with an **OV5647
-MIPI-CSI camera**. Browser MJPEG streaming is enabled by default. The older
-Jetson H.264 sender remains available as an alternate build mode.
+MIPI-CSI camera**. Direct browser H.264 streaming is enabled by default.
+Browser MJPEG and the original Jetson H.264 sender remain alternate build modes.
 
-## Browser mode
+## Browser H.264 mode (default)
 
-The default firmware captures RGB565 frames at the sensor's native 1920x1080,
+The camera's native YUV420 frames go directly to the P4 hardware H.264 encoder.
+The ESP packages the resulting H.264 access units as fragmented MP4 and serves
+them over HTTP. Its embedded browser player uses MediaSource and a video element:
+
+    http://<esp32-ip>/
+
+No Jetson, cloud service, browser extension, or WebCodecs/HTTPS setup is needed.
+Use a browser with H.264-in-MP4 MediaSource support, such as a supported desktop
+Chrome/Edge build. The player checks the exact codec from the encoder's SPS and
+shows an error if the browser cannot decode it. It uses no CDN assets.
+
+The defaults are native **1920x1080**, a **30 FPS** capture target, **4 Mbps**
+H.264 target bitrate, three camera buffers, two encoded buffers, and a 32 KiB
+TCP send buffer. Actual sent/displayed FPS still depends on Wi-Fi and decoding.
+There is no CPU resize or JPEG re-encoding. The MJPEG width/height settings are
+ignored in this mode; changing the sensor's native mode changes H.264 resolution.
+
+Click **Start**/**Stop** to control playback. One browser viewer is supported at
+a time; stop/close the current player before opening another. The HTTP server
+handles the long-lived stream synchronously, so other requests can wait while
+it is active. Stopping/reconnecting starts a fresh encoder and IDR sequence.
+Encoded dependent frames are not dropped during a session. The browser bounds
+its playback buffer and catches up to the live edge if it falls behind.
+
+While streaming, serial logs print `H264 stats` every five seconds: encoded/sent
+frame counts, measured sent FPS and bitrate, encode/mux/send times, frame age,
+and queue depth. The page also shows browser playback statistics when available.
+These measurements are separate from the configured camera FPS. `/stream.mp4`
+is the continuous fragmented-MP4 endpoint consumed by the player.
+
+Both browser modes keep Wi-Fi modem sleep disabled (higher power consumption)
+and enable TCP_NODELAY. Keep the board and browser on the same trusted LAN.
+The HTTP endpoint has no authentication or encryption; do not expose it publicly.
+
+## Browser MJPEG fallback
+
+The MJPEG firmware captures RGB565 frames at the sensor's native 1920x1080,
 resizes them to 1280x720 on the P4, JPEG-encodes them with the hardware JPEG
 encoder, and serves an HTTP MJPEG stream:
 
@@ -35,16 +71,18 @@ Set these menu items:
 1. **Example Connection Configuration**
    - Wi-Fi SSID and password (2.4 GHz).
 2. **Camera Streaming Configuration**
-   - Keep **Serve browser MJPEG stream** enabled.
-   - Set **Frame width (browser output / H.264 capture)** to **1280** and
-     **Frame height (browser output / H.264 capture)** to **720** for 720p.
-   - Adjust HTTP port, JPEG quality, resolution, and FPS if needed.
+   - Under **Streaming mode**, select **Serve browser H.264 stream (native
+     capture)** for direct H.264 playback (the default).
+   - Adjust the HTTP port, H.264 target bitrate, QP bounds, and frame rate if needed.
+   - To restore MJPEG, select **Serve browser MJPEG stream**. Set **Frame width
+     (MJPEG output / Jetson capture)** to **1280** and **Frame height (MJPEG
+     output / Jetson capture)** to **720** for its resized 720p output.
 
 The checked-in defaults already select the Waveshare board's ESP32-C6 over
 4-bit SDIO, its GPIO wiring, 32 MB flash, 32 MB PSRAM at 200 MHz, the OV5647
 MIPI-CSI sensor, the ISP pipeline, and the ESP32-P4 hardware video support.
 
-The performance defaults are:
+The MJPEG fallback performance defaults are:
 
 - 1920x1080 capture, resized to a 1280x720 MJPEG stream
 - 30 FPS camera configuration (measured stream FPS depends on throughput)
@@ -85,11 +123,27 @@ The resize helper can also be checked on a computer with GCC, from `esp32-p4`:
 
 After the ESP32 joins Wi-Fi, open the printed URL in a browser.
 
+Open logs without flashing with `idf.py -p <PORT> monitor`; exit with Ctrl+].
+
+## Host checks
+
+From `esp32-p4`, with GCC and Node.js available:
+
+    gcc -std=c11 -O2 -Wall -Wextra -Werror -I main main/h264_mp4.c tests/test_h264_mp4.c -o build/test_h264_mp4.exe
+    ./build/test_h264_mp4.exe
+    node --test tests/test_h264_player.mjs
+
+The MP4 checks cover Annex-B framing, SPS/PPS, init/fragment boxes, keyframe
+flags, timestamps, and output-buffer bounds. The player checks cover its live
+buffer policy and asynchronous append/cancellation behavior. A camera and a
+flashed board are still required to measure end-to-end FPS.
+
 ## Jetson H.264 mode
 
-To restore the original Jetson sender, open `idf.py menuconfig`, disable
-**Serve browser MJPEG stream**, and configure the Jetson IP, TCP port, H.264
-settings, and stream button under **Camera Streaming Configuration**.
+To restore the original Jetson sender, select **Send H.264 over TCP to Jetson**
+under **Camera Streaming Configuration -> Streaming mode**. Configure the Jetson
+IP, TCP port, H.264 settings, and stream button. Use the sensor's native capture
+dimensions (normally 1920x1080); this sender has no 720p resize stage.
 
 That mode sends each access unit as:
 
