@@ -14,5 +14,5 @@ bool rgb565_resize_prepare(uint32_t input_width, uint32_t input_height,
  * input rows may have padding. Input/output must not overlap. */
 void rgb565_resize_frame(const uint8_t *input, uint16_t *output,
                          uint32_t input_width, uint32_t output_width,
-                         uint32_t output_height,
-                         const uint32_t *columns, const size_t *row_offsets);
+                         uint32_t output_height, const uint32_t *columns,
+                         const size_t *row_offsets);
