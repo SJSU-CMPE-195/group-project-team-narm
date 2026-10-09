@@ -32,8 +32,14 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 
 ## Demo
 
-#### Trial 1: https://drive.google.com/file/d/1KT8tJLhU8_RAIu3LAAFUE22tZD822viF/view?usp=drive_link
-#### Trial 2: https://drive.google.com/file/d/14Ed6Ce-xtvRCOp3gI132woxyjiATuiI4/view?usp=drive_link
+#### Trial 1 (with Raspberry pi): https://drive.google.com/file/d/1KT8tJLhU8_RAIu3LAAFUE22tZD822viF/view?usp=drive_link
+#### Trial 2 (with Raspberry pi): https://drive.google.com/file/d/14Ed6Ce-xtvRCOp3gI132woxyjiATuiI4/view?usp=drive_link
+
+#### First H264 browser stream with 25-27 FPS: https://drive.google.com/file/d/1kxpYcOKgZbU-y9zeQ-B9SgL2epeLz3yH/view?usp=drive_link
+
+Proof of FPS:
+<img width="1313" height="735" alt="image" src="https://github.com/user-attachments/assets/cf6f124d-2c44-4676-9cd0-f05a475fc0db" />
+
 
 ---
 
