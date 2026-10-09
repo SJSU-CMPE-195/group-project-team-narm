@@ -18,30 +18,22 @@ class H264PayloadDecoder:
             raise RuntimeError("Missing dependency: av. Install with `pip install av`.") from e
 
         self._av = av
-        self._codec = av.CodecContext.create("h264", "r")
+        self._codec = self._new_codec()
 
-    def decode_payload(self, payload: bytes) -> List[DecodedFrame]:
-        # #region agent log
-        import json, time
+    def _new_codec(self):
+        codec = self._av.CodecContext.create("h264", "r")
+        codec.thread_type = "AUTO"
+        return codec
+
+    def reset(self) -> None:
+        """Start a fresh decoder when the ESP reconnects with a new H.264 stream."""
         try:
-            with open("debug-9d06a1.log", "a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "sessionId": "9d06a1",
-                            "runId": "run1",
-                            "hypothesisId": "H3",
-                            "location": "jetson-code/decode_h264.py",
-                            "message": "decode_payload",
-                            "data": {"payload_bytes": len(payload), "prefix_hex": payload[:8].hex()},
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
+            self._codec.close()
         except Exception:
             pass
-        # #endregion agent log
+        self._codec = self._new_codec()
+
+    def decode_payload(self, payload: bytes) -> List[DecodedFrame]:
         pkt = self._av.Packet(payload)
         frames = self._codec.decode(pkt)
         out: List[DecodedFrame] = []

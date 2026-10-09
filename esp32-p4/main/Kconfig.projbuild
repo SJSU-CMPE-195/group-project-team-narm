@@ -1,0 +1,178 @@
+menu "Camera Streaming Configuration"
+
+    choice EXAMPLE_STREAM_MODE
+        prompt "Streaming mode"
+        default EXAMPLE_BROWSER_H264
+
+        config EXAMPLE_BROWSER_H264
+            bool "Serve browser H.264 stream (native capture)"
+            help
+                Hardware H.264 packaged as fragmented MP4 over HTTP.
+                Open the device IP address in a browser with H.264 MediaSource
+                support. No Jetson, external player service, or HTTPS is needed.
+                Uses the sensor's native resolution without CPU resizing.
+                One browser viewer is supported at a time.
+
+        config EXAMPLE_BROWSER_MJPEG
+            bool "Serve browser MJPEG stream"
+            help
+                Serve independent JPEG frames at /stream using a browser img.
+                Frame width/height set the resized JPEG output dimensions.
+
+        config EXAMPLE_JETSON_H264
+            bool "Send H.264 over TCP to Jetson"
+            help
+                Original length-prefixed H.264 TCP sender with a stream button.
+    endchoice
+
+    config EXAMPLE_HTTP_PORT
+        int "Browser HTTP port"
+        default 80
+        range 1 65535
+        depends on EXAMPLE_BROWSER_MJPEG || EXAMPLE_BROWSER_H264
+        help
+            TCP port used by the browser HTTP server.
+
+    config EXAMPLE_CAMERA_VIDEO_BUFFER_NUMBER
+        int "Browser camera buffer count"
+        default 3
+        range 2 4
+        depends on EXAMPLE_BROWSER_MJPEG || EXAMPLE_BROWSER_H264
+        help
+            Number of MMAP camera buffers used by the browser stream.
+
+    config EXAMPLE_JPEG_COMPRESSION_QUALITY
+        int "Browser JPEG quality"
+        default 70
+        range 1 100
+        depends on EXAMPLE_BROWSER_MJPEG
+        help
+            JPEG quality for the browser MJPEG stream. Higher values improve
+            image quality but use more Wi-Fi bandwidth.
+
+    config EXAMPLE_HTTP_PART_BOUNDARY
+        string "MJPEG HTTP part boundary"
+        default "esp32p4frame"
+        depends on EXAMPLE_BROWSER_MJPEG
+        help
+            Boundary string separating JPEG frames in the HTTP stream.
+
+    config EXAMPLE_JETSON_IP
+        string "Jetson IP address"
+        default "192.168.4.2"
+        help
+            IP address of the Jetson Orin Nano (receiver).
+
+    config EXAMPLE_JETSON_PORT
+        int "Jetson TCP port"
+        default 5000
+        range 1 65535
+        help
+            TCP port on which the Jetson is listening for the H.264 stream.
+
+    config EXAMPLE_STREAM_BUTTON_GPIO
+        int "Stream toggle button GPIO"
+        default 0
+        help
+            GPIO number for the button. First press = start stream, second press = stop.
+            Assumed active-low (pulled up). Adjust button_task if your button is active-high.
+
+    config EXAMPLE_AUTOSTART_STREAM
+        bool "Start streaming automatically after Wi-Fi connects"
+        default y
+        help
+            Start the camera stream automatically after networking is ready.
+            The configured button can still stop and restart the stream.
+
+    config EXAMPLE_FRAME_WIDTH
+        int "Frame width (MJPEG output / Jetson capture)"
+        default 1280 if EXAMPLE_BROWSER_MJPEG
+        default 1920
+        range 320 1920
+        help
+            In browser mode, this is the JPEG stream width. RGB565 camera
+            frames are resized before encoding if the sensor's active mode
+            is larger. Set 1280 for a 720p stream. Upscaling is not supported.
+            In H.264 mode, this is the requested camera capture width.
+            Browser H.264 ignores this setting and uses the sensor's native mode.
+
+    config EXAMPLE_FRAME_HEIGHT
+        int "Frame height (MJPEG output / Jetson capture)"
+        default 720 if EXAMPLE_BROWSER_MJPEG
+        default 1080
+        range 240 1080
+        help
+            In browser mode, this is the JPEG stream height. Set 720 for a
+            720p stream. The OV5647 still captures in its active sensor mode,
+            normally 1920x1080 at 30 FPS, before resizing on the P4.
+            In H.264 mode, this is the requested camera capture height.
+            Browser H.264 ignores this setting and uses the sensor's native mode.
+
+    config EXAMPLE_FRAME_FPS
+        int "Capture frame rate"
+        default 30
+        range 5 60
+        help
+            Requested camera frame rate. The OV5647 board configuration uses
+            1080p30. This sets the camera rate, not measured stream throughput.
+
+    config EXAMPLE_H264_I_PERIOD
+        int "H.264 I-frame period (frames)"
+        default 30
+        range 1 120
+        help
+            Frames between I-frames. Lower = better seek/recovery, higher bitrate.
+
+    config EXAMPLE_H264_BITRATE
+        int "H.264 bitrate (bps)"
+        default 4000000
+        range 250000 12000000
+        help
+            Target bitrate for H.264 encoding. 4 Mbps is a practical 1080p30
+            starting point for preserving hand and finger detail.
+
+    config EXAMPLE_H264_MIN_QP
+        int "H.264 minimum QP"
+        default 25
+        range 0 51
+        help
+            Minimum quantization parameter (higher quality).
+
+    config EXAMPLE_H264_MAX_QP
+        int "H.264 maximum QP"
+        default 35
+        range 0 51
+        help
+            Maximum quantization parameter. Must be > EXAMPLE_H264_MIN_QP.
+
+    config EXAMPLE_TCP_SNDBUF_BYTES
+        int "TCP send buffer (bytes)"
+        default 262144
+        range 32768 1048576
+        help
+            Socket send buffer used to absorb short Wi-Fi scheduling stalls.
+
+    config EXAMPLE_TCP_SEND_TIMEOUT_MS
+        int "TCP send timeout (milliseconds)"
+        default 3000
+        range 250 30000
+        help
+            Stops a dead connection from holding encoder buffers forever.
+
+    config EXAMPLE_RECONNECT_DELAY_MS
+        int "Reconnect delay (milliseconds)"
+        default 1000
+        range 100 30000
+
+    config EXAMPLE_STATS_INTERVAL_SEC
+        int "Performance log interval (seconds)"
+        default 5
+        range 1 60
+        help
+            Browser mode logs measured sent FPS, average JPEG size, and
+            capture wait, resize, encode, and HTTP send times at this interval.
+            Browser H.264 reports sent FPS, bitrate, encode/mux/send time,
+            queue depth, and frame age. Jetson H.264 reports encoded/sent
+            FPS, bitrate, queue depth, and buffer age.
+
+endmenu

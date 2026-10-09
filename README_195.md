@@ -1,6 +1,6 @@
 # Project Title
 
-Wearable ASL-to-speech glasses that translates ASL into spoken audio
+Wearable device that translates ASL to English in real time.
 
 ## Team
 
@@ -11,7 +11,7 @@ Wearable ASL-to-speech glasses that translates ASL into spoken audio
 | Name 3 | [@ajimenez8203](https://github.com/ajimenez8203)       | aaron.jimenez@sjsu.edu|
 | Name 4 | [@mkhantkk](https://github.com/mkhantkk)               | minkhant.koko@sjsu.edu|
 
-**Advisor:** [Kaikai Liu]
+**Advisor:** Kaikai Liu
 
 ---
 
@@ -27,15 +27,19 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 
 - Fully offline
 - Wearable factor
-- Feature 3
 
 ---
 
 ## Demo
 
-[Link to demo video or GIF]
+#### Trial 1 (with Raspberry pi): https://drive.google.com/file/d/1KT8tJLhU8_RAIu3LAAFUE22tZD822viF/view?usp=drive_link
+#### Trial 2 (with Raspberry pi): https://drive.google.com/file/d/14Ed6Ce-xtvRCOp3gI132woxyjiATuiI4/view?usp=drive_link
 
-**Live Demo:** [URL if deployed]
+#### First H264 browser stream with 25-27 FPS: https://drive.google.com/file/d/1kxpYcOKgZbU-y9zeQ-B9SgL2epeLz3yH/view?usp=drive_link
+
+Proof of FPS:
+<img width="1313" height="735" alt="image" src="https://github.com/user-attachments/assets/cf6f124d-2c44-4676-9cd0-f05a475fc0db" />
+
 
 ---
 
@@ -65,38 +69,40 @@ Our project is an _Offline_ ASL translation embedded in a pair of glasses. There
 ## Getting Started
 
 ### Prerequisites
- - ESP-IDF v5.3.2
- - Python 3.8+
+ - ESP-IDF v5.4+
+ - Python 3.10
  - Jetson Nano (with JetPack SDK installed)
  - ESP32-P4-WIFI6
  - OV5647 camera module
 
 ### Installation
 
-- Install ESP-IDF v5.3.2:
+- Install ESP-IDF v5.4 or newer:
   - Visit Espressif's website: https://docs.espressif.com/projects/idf-im-ui/en/latest/
   - Follow Espressif's install guide for your system
-  - Make sure to choose **v5.3.2**
 
-- Build + flash the ESP32-P4 firmware:
+- Build and flash the ESP32-P4 firmware:
 
 ```bash
 git clone https://github.com/SJSU-CMPE-195/group-project-team-narm.git
 cd group-project-team-narm
-cd ov5647_capture
-
+cd esp32-p4
 idf.py set-target esp32p4
+idf.py menuconfig
 idf.py build
 idf.py -p <PORT> flash monitor
 ```
 
 - Set up the Jetson (Newton):
   - See `jetson-code/README.md`
+- Set up the ESP32-P4 camera sender:
+  - See `esp32-p4/README.md`
 
 ### Running the POC
-1. Power on the esp32 with the ov5647 camera connected via MIPI-CSI.
-2. Flash the firmware using 'idf.py flash' .
-3. The esp32 captures video, encodes it as h.264, and streams it over wifi.
+1. Power on the ESP32-P4-WIFI6 with the OV5647 connected via MIPI-CSI.
+2. Build and flash the firmware from `esp32-p4/`.
+3. The P4 captures video, hardware-encodes H.264, and streams it through its
+   ESP32-C6 Wi-Fi coprocessor.
 4. On the Jetson Nano, run the inference server to receive the stream and perform ASL translation.
 
 ### What's Next

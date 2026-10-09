@@ -19,8 +19,11 @@ jobs:
 
       - name: Check formatting (clang-format)
         run: |
-          # Find source files and fail if formatting differs
-          if ! find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) -print0 | \
+          # Check project sources, excluding the vendored ESP-Hosted trees
+          # (which include generated protobuf code and upstream dependencies).
+          if ! git ls-files -z -- '*.c' '*.h' '*.cpp' '*.hpp' \
+            ':(exclude)slave/main/**' \
+            ':(exclude)esp32-p4/slave/main/**' | \
             xargs -0 -r clang-format --dry-run --Werror; then
             echo "Formatting check failed. Run clang-format on your files and commit the changes."
             exit 1
