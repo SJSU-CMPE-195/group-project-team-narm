@@ -81,7 +81,9 @@ class HolisticLSTMInfer:
 
     def _predict(self, sequence: List[np.ndarray]) -> Tuple[int, float, np.ndarray]:
         x = np.expand_dims(np.array(sequence, dtype=np.float32), axis=0)  # (1, T, 1662)
-        res = self.model.predict(x, verbose=0)[0]
+        # Direct eager invocation avoids Keras predict()'s per-call data adapter.
+        output = self.model(x, training=False)
+        res = np.asarray(output)[0]
         idx = int(np.argmax(res))
         conf = float(res[idx])
         return idx, conf, res

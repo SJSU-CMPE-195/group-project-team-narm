@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32-P4 live video</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10151c; color: #edf2f7; }
+    body { margin: 0; padding: clamp(16px, 4vw, 40px); }
+    main { max-width: 1000px; margin: auto; }
+    h1 { font-size: clamp(1.4rem, 4vw, 2rem); margin-top: 0; }
+    video { display: block; width: 100%; max-height: 75vh; background: #000; border-radius: 8px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0; }
+    button { font: inherit; padding: 10px 24px; border: 1px solid #7b9cbc; border-radius: 6px; background: #244a70; color: white; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    button:focus-visible { outline: 3px solid #9acbff; outline-offset: 3px; }
+    p { line-height: 1.5; overflow-wrap: anywhere; }
+    #status { padding: 12px; border-radius: 6px; background: #1e2a37; }
+    #status[data-state="error"] { color: #ffd2d2; background: #492528; }
+    .hint { color: #b5c4d3; font-size: .9rem; }
+    #stats { font-variant-numeric: tabular-nums; }
+  </style>
+  <script src="/player.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>ESP32-P4 live video</h1>
+    <video id="video" muted autoplay playsinline controls aria-label="Live camera video"></video>
+    <div class="actions">
+      <button id="start" type="button">Start</button>
+      <button id="stop" type="button" disabled>Stop</button>
+    </div>
+    <p id="status" role="status" aria-live="polite">Ready to connect.</p>
+    <p id="metadata">Waiting for stream information.</p>
+    <p id="stats">Browser FPS: waiting for playback.</p>
+    <p class="hint">FPS is measured from browser playback counters, independently of the camera target.
+      Rendered frames are total frames minus dropped frames; a separate decoded count is shown when available.
+      Hidden tabs and paused or buffering playback restart the measurement window.</p>
+    <p class="hint">Stop closes the stream. Use Start to reconnect after an error. Playback uses the local HTTP connection.</p>
+    <noscript><p>Enable JavaScript to play this video.</p></noscript>
+  </main>
+</body>
+</html>
