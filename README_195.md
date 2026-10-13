@@ -43,7 +43,7 @@ Proof of FPS:
 
 ---
 
-## Screenshots
+## Screenshots (to be added)
 
 | Feature     | Screenshot                                   |
 | ----------- | -------------------------------------------- |
@@ -72,7 +72,7 @@ Proof of FPS:
  - ESP-IDF v5.4+
  - Python 3.10
  - Jetson Nano (with JetPack SDK installed)
- - ESP32-P4-WIFI6
+ - [ESP32-P4-WIFI6](https://www.waveshare.com/esp32-p4-wifi6.htm?srsltid=AU7gw4WeEIDN37uu-iCemN2JvYfyvlCfVwbwqA15301aoQGrSNJV_nOV) from Waveshare
  - OV5647 camera module
 
 ### Installation
