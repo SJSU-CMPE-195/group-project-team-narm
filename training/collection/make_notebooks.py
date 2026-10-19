@@ -86,7 +86,10 @@ MediaPipe keypoints and a manifest row for every take you approve.
 
 **How to use (desktop Chrome, laptop webcam):**
 
-1. Run **1. Install** (about a minute). If Colab says *Restart session*, restart it and continue from step 2.
+0. **First, pick the older Colab runtime:** Runtime > Change runtime type > **Runtime version** > **2025.07**
+   (Python 3.11), then Save. The newest runtime (Python 3.13) cannot install the MediaPipe version we need.
+1. Run **1. Install** (about a minute). When it finishes, do **Runtime > Restart session**, then continue from
+   step 2 (do not re-run the install cell).
 2. In **2. Config**, type your first name in `PERSON` (lowercase) and press play.
 3. Press play on **Setup** (it mounts Google Drive so takes survive a disconnect - click Allow).
 4. Press play on **3. Record takes**. Allow camera access when Chrome asks.
@@ -99,13 +102,33 @@ MediaPipe keypoints and a manifest row for every take you approve.
 **Tips:** keep your head and both hands in frame, sit about where the glasses camera would see a signer,
 use even lighting, and use the same camera position for every take. Saved frames are never mirrored.
 Do not change `FPS`, `CLIP_SECONDS`, `WIDTH` or `HEIGHT` - they must match across the whole team.
+
+**If you see an error:**
+
+- *"This Colab runtime uses Python 3.13 ..."* or pip *"No matching distribution found for mediapipe==0.10.18"*:
+  Runtime > Change runtime type > Runtime version > **2025.07** > Save, then re-run **1. Install**.
+- *"no legacy mp.solutions.holistic"*: the wrong MediaPipe is installed. Do the step above, re-run **1. Install**,
+  then **Runtime > Restart session**.
+- *pip "dependency resolver" / "incompatible" warnings*: harmless, ignore them. Just restart the session.
+- *"Set PERSON in the config cell"*: type your first name in `PERSON` and re-run the Config cell.
+- *No camera preview*: use desktop Chrome, click Allow on the camera prompt, and close other apps using the webcam.
+- After any restart, skip **1. Install** and re-run Config, Setup, then Record.
 """
 
 INSTALL_CODE = """\
 #@title 1. Install requirements { display-mode: "form" }
-# About a minute. If Colab prompts "Restart session" afterwards, restart and run the next cells.
-# To match the Jetson exactly you can pin the version instead:  !pip install -q mediapipe==0.10.18
-!pip install -q mediapipe
+# About a minute.
+# Pinned to the version the Jetson runs (newer builds drop mp.solutions.holistic).
+# mediapipe 0.10.18 only ships wheels for Python 3.9-3.12.
+# After this cell finishes, restart the session (Runtime > Restart session), then run the next cells.
+import sys
+if sys.version_info >= (3, 13):
+    raise RuntimeError(
+        "This Colab runtime uses Python %d.%d, which mediapipe 0.10.18 does not support. "
+        "Go to Runtime > Change runtime type > Runtime version, pick 2025.07 "
+        "(Python 3.11), save, and run this cell again." % sys.version_info[:2]
+    )
+!pip install -q mediapipe==0.10.18
 """
 
 CONFIG_CODE = '''\

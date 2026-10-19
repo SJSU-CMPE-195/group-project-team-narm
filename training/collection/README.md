@@ -23,7 +23,9 @@ python make_notebooks.py --all              # all words in WORDS
 
 1. Open Colab (desktop Chrome), choose **File > Upload notebook**, pick `notebooks/collect_<word>.ipynb`
    (or open it from GitHub once it is pushed).
-2. Run **1. Install** (about a minute). If Colab says *Restart session*, restart it and keep going.
+2. **Set the runtime version first:** Runtime > Change runtime type > **Runtime version** > **2025.07**
+   (Python 3.11) > Save. The default "Latest" runtime is Python 3.13, where `mediapipe==0.10.18` cannot install.
+   Then run **1. Install** (about a minute) and do **Runtime > Restart session**. Do not re-run the install cell.
 3. In **2. Config** type your first name into `PERSON` (lowercase). Leave everything else alone.
 4. Run **Setup** (it mounts Google Drive, click Allow), then **3. Record takes**, and allow the camera.
 5. Per take: the word flashes, 5-4-3-2-1 countdown, then recording with a `REC n/90` counter in the corner.
@@ -55,6 +57,9 @@ Per good take, under `<Drive>/ASL_collection/<word>/` (or `/content/asl_collecti
 - `<word>_<person>_<NNN>.npy`: keypoints, shape `(90, 1662)`, float32
 - one row in `manifest.csv` (next to the word folders): word, person, take, fps, frames, hand/pose/face
   coverage, measured capture fps, repeated-frame count, mediapipe version, timestamp
+
+To bring takes into the repo, copy them into `training/new_videos/<word>/` (one folder per word already
+exists there). The old dataset in `training/raw_videos/` is kept separately and is never touched by the notebooks.
 
 Each take is saved the moment you click Good, so a Colab disconnect only loses the take in progress.
 If you run without Drive, download the zip from step 9 before closing the tab.
@@ -90,4 +95,20 @@ Split train/test by **person**, not by take, to get an honest accuracy number.
   Python after each take (a few seconds per take).
 - Words come from the folders in `training/raw_videos/`. `upper` and `lower` were in the original
   34-word list but have no folders yet; add them to `WORDS` in `make_notebooks.py` if they are kept.
-- If a newer mediapipe lacks `mp.solutions`, pin it in the install cell: `!pip install -q mediapipe==0.10.18`.
+- Newer mediapipe builds (0.10.30+, 1.x) lack `mp.solutions`, and 0.10.18 has no Python 3.13 wheel, so the
+  notebooks need the Colab **2025.07** runtime. Do not switch to the MediaPipe Tasks API: the keypoints must
+  match the Jetson's `mp.solutions.holistic`.
+
+## Troubleshooting
+
+| Error | Cause | Fix |
+| --- | --- | --- |
+| `RuntimeError: This Colab runtime uses Python 3.13 ...` | runtime is on "Latest" | Runtime > Change runtime type > Runtime version > 2025.07 > Save, re-run **1. Install** |
+| pip `No matching distribution found for mediapipe==0.10.18` | same as above (Python too new) | same as above |
+| `RuntimeError: ... no legacy mp.solutions.holistic` | wrong mediapipe installed, or session not restarted | switch to 2025.07, re-run **1. Install**, then Runtime > Restart session |
+| pip "dependency resolver ... incompatible" warnings | other preinstalled Colab packages disagree on numpy/protobuf | harmless; ignore, then restart the session |
+| `ValueError: Set PERSON ...` | `PERSON` is empty | type your first name (lowercase), re-run Config |
+| no camera preview | not desktop Chrome, permission denied, or webcam in use | use desktop Chrome, click Allow, close other apps using the camera |
+| everything vanished after a restart | restart clears Python state | skip **1. Install**; re-run Config, Setup, then Record (saved takes are on Drive and resume) |
+
+Local editors (Cursor/VS Code) cannot run these notebooks: the camera UI needs Colab's browser runtime.

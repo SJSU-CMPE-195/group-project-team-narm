@@ -38,8 +38,9 @@ except Exception:  # pragma: no cover - only hit outside IPython
 # ---------------------------------------------------------------- config checks
 if not hasattr(mp, "solutions"):
     raise RuntimeError(
-        "This mediapipe build has no legacy mp.solutions.holistic. In the install cell use "
-        "'!pip install -q mediapipe==0.10.18' (the version the Jetson runs), then restart the runtime."
+        "This mediapipe build has no legacy mp.solutions.holistic. Set Runtime > Change runtime type > "
+        "Runtime version to 2025.07 (Python 3.11), re-run the install cell "
+        "('!pip install -q mediapipe==0.10.18', the version the Jetson runs), then Runtime > Restart session."
     )
 mp_holistic = mp.solutions.holistic
 
