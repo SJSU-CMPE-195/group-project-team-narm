@@ -1,0 +1,18 @@
+dependencies:
+  idf: ">=5.4"
+  espressif/esp_video:
+    version: "2.3.0"
+  example_video_common:
+    git: https://github.com/espressif/esp-video-components.git
+    path: esp_video/examples/common_components/example_video_common
+    version: 78a5652f5f64a18ca93be80c1e71a3feb7ee20c9
+  protocol_examples_common:
+    path: ${IDF_PATH}/examples/common_components/protocol_examples_common
+  esp_wifi_remote:
+    version: "1.6.4"
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/esp_hosted:
+    version: "2.11.4"
+    rules:
+      - if: "target in [esp32p4]"
