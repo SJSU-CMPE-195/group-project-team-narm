@@ -2,7 +2,7 @@ menu "Camera Streaming Configuration"
 
     choice EXAMPLE_STREAM_MODE
         prompt "Streaming mode"
-        default EXAMPLE_BROWSER_H264
+        default EXAMPLE_JETSON_H264
 
         config EXAMPLE_BROWSER_H264
             bool "Serve browser H.264 stream (native capture)"
@@ -59,7 +59,7 @@ menu "Camera Streaming Configuration"
 
     config EXAMPLE_JETSON_IP
         string "Jetson IP address"
-        default "192.168.4.2"
+        default "10.42.0.1"
         help
             IP address of the Jetson Orin Nano (receiver).
 
@@ -72,10 +72,13 @@ menu "Camera Streaming Configuration"
 
     config EXAMPLE_STREAM_BUTTON_GPIO
         int "Stream toggle button GPIO"
-        default 0
+        default 35
+        range 0 54
         help
-            GPIO number for the button. First press = start stream, second press = stop.
-            Assumed active-low (pulled up). Adjust button_task if your button is active-high.
+            GPIO number for the button. Each press toggles streaming on or off.
+            Uses an internal pull-up: wire a momentary switch from this GPIO to GND.
+            GPIO35 is the onboard BOOT button on Waveshare ESP32-P4-WIFI6.
+            Release BOOT during reset, then press it after the ready log appears.
 
     config EXAMPLE_AUTOSTART_STREAM
         bool "Start streaming automatically after Wi-Fi connects"
@@ -83,6 +86,7 @@ menu "Camera Streaming Configuration"
         help
             Start the camera stream automatically after networking is ready.
             The configured button can still stop and restart the stream.
+            Leave disabled for first press = start, second press = stop.
 
     config EXAMPLE_FRAME_WIDTH
         int "Frame width (MJPEG output / Jetson capture)"
@@ -153,11 +157,12 @@ menu "Camera Streaming Configuration"
             Socket send buffer used to absorb short Wi-Fi scheduling stalls.
 
     config EXAMPLE_TCP_SEND_TIMEOUT_MS
-        int "TCP send timeout (milliseconds)"
+        int "TCP connect/send timeout (milliseconds)"
         default 3000
         range 250 30000
         help
-            Stops a dead connection from holding encoder buffers forever.
+            Bounds connection attempts and socket sends. The stream button can
+            cancel an in-progress connection attempt.
 
     config EXAMPLE_RECONNECT_DELAY_MS
         int "Reconnect delay (milliseconds)"

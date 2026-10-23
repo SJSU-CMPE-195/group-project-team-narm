@@ -1,10 +1,36 @@
 # ESP32-P4 OV5647 Camera Firmware
 
 This firmware targets the **Waveshare ESP32-P4-WIFI6** with an **OV5647
-MIPI-CSI camera**. Direct browser H.264 streaming is enabled by default.
-Browser MJPEG and the original Jetson H.264 sender remain alternate build modes.
+MIPI-CSI camera**. H.264 over TCP to the Jetson is enabled by default for the demo.
+Browser H.264 and MJPEG remain alternate build modes.
 
-## Browser H.264 mode (default)
+## Jetson demo configuration (default)
+
+The checked-in defaults select **Send H.264 over TCP to Jetson** with:
+
+- Wi-Fi SSID `ASLHotspot`, password `YourStrongPassphrase`
+- Jetson `10.42.0.1:5000`
+- Native OV5647 capture at **1920x1080**, with a **30 FPS** capture target and no resize
+- **GPIO35**, the onboard **BOOT** button, as the active-low stream toggle
+- **Start streaming automatically after Wi-Fi connects** enabled
+
+GPIO35 is connected to BOOT in the [Waveshare schematic, page 1](https://files.waveshare.com/wiki/ESP32-P4-WIFI6/ESP32-P4-WIFI6-datasheet.pdf).
+Release BOOT during reset so the board boots normally. The firmware connects
+and starts streaming automatically after Wi-Fi is ready. Press BOOT to stop
+streaming and close the TCP connection; press it again to restart. An external
+momentary switch may instead connect the configured GPIO to GND; the firmware
+enables its internal pull-up. Choose a free pin if changing the GPIO.
+
+Start `jetson-code/main.py` on the Jetson before powering or resetting the board. After building
+and flashing, expect `connected to Jetson at 10.42.0.1:5000`, followed by
+`stats:` lines every five seconds. Approximately 27 FPS is the demo throughput
+target; measured throughput depends on the hardware and network.
+
+Existing local `sdkconfig` values override defaults. Check the streaming mode,
+network settings, GPIO, resolution, and enabled autostart in `idf.py menuconfig`
+before rebuilding an existing checkout.
+
+## Browser H.264 mode
 
 The camera's native YUV420 frames go directly to the P4 hardware H.264 encoder.
 The ESP packages the resulting H.264 access units as fragmented MP4 and serves
@@ -71,9 +97,12 @@ Set these menu items:
 1. **Example Connection Configuration**
    - Wi-Fi SSID and password (2.4 GHz).
 2. **Camera Streaming Configuration**
-   - Under **Streaming mode**, select **Serve browser H.264 stream (native
-     capture)** for direct H.264 playback (the default).
-   - Adjust the HTTP port, H.264 target bitrate, QP bounds, and frame rate if needed.
+   - Under **Streaming mode**, select **Send H.264 over TCP to Jetson** for the demo.
+   - Set Jetson IP **10.42.0.1**, TCP port **5000**, button GPIO **35**, and
+     capture dimensions **1920x1080**. Enable **Start streaming automatically
+     after Wi-Fi connects**.
+   - For direct browser playback, select **Serve browser H.264 stream (native
+     capture)** and adjust its HTTP port and H.264 settings if needed.
    - To restore MJPEG, select **Serve browser MJPEG stream**. Set **Frame width
      (MJPEG output / Jetson capture)** to **1280** and **Frame height (MJPEG
      output / Jetson capture)** to **720** for its resized 720p output.
@@ -121,11 +150,22 @@ The resize helper can also be checked on a computer with GCC, from `esp32-p4`:
     idf.py build
     idf.py -p <PORT> flash monitor
 
-After the ESP32 joins Wi-Fi, open the printed URL in a browser.
+After the ESP32 joins Wi-Fi, it automatically starts the Jetson stream. Press
+BOOT to stop and again to restart. In an alternate browser mode, open the printed URL.
 
 Open logs without flashing with `idf.py -p <PORT> monitor`; exit with Ctrl+].
 
 ## Host checks
+
+With Python and GCC available, check the Jetson sender's active-low button,
+stop/restart during cleanup, and cancelled connection behavior without a board:
+
+    python tests/test_jetson_stream_control.py
+    python tests/test_jetson_buffer_backpressure.py
+
+The buffer test holds both encoder outputs to simulate a slow TCP receiver,
+then checks that encoding waits, resumes after a buffer is requeued, and stops
+cleanly. It also covers reconnect and failed buffer requeue behavior.
 
 From `esp32-p4`, with GCC and Node.js available:
 
@@ -140,7 +180,7 @@ flashed board are still required to measure end-to-end FPS.
 
 ## Jetson H.264 mode
 
-To restore the original Jetson sender, select **Send H.264 over TCP to Jetson**
+The default sender is **Send H.264 over TCP to Jetson**
 under **Camera Streaming Configuration -> Streaming mode**. Configure the Jetson
 IP, TCP port, H.264 settings, and stream button. Use the sensor's native capture
 dimensions (normally 1920x1080); this sender has no 720p resize stage.
@@ -168,6 +208,9 @@ latency measurements separately. Use both lines when tuning:
 
 - If ESP encoded FPS is low, investigate camera/ISP/encoder configuration.
 - If ESP queue depth or buffer age rises, investigate Wi-Fi or TCP throughput.
+- The sender reserves an encoder output buffer before capture/encoding and
+  returns it after sending, so a slow receiver applies backpressure without
+  exhausting the hardware encoder's queued buffers.
 - If Jetson decode FPS matches receive FPS but inference FPS is low, the
   MediaPipe/model stage is the bottleneck.
 

@@ -10,6 +10,7 @@
  * Encoded frames are never discarded because later P-frames may depend on them.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -30,9 +31,11 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_video_ioctl.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
@@ -52,6 +55,7 @@
 #define SKIP_STARTUP_FRAME_COUNT 2
 #define BUTTON_DEBOUNCE_MS 200
 #define STREAM_FRAME_HEADER_SIZE 4
+#define TCP_CONNECT_POLL_MS 100
 
 static const char *TAG = "p4_h264_stream";
 
@@ -74,6 +78,9 @@ typedef struct {
   uint8_t *encoded_buffer[ENCODED_BUFFER_COUNT];
   size_t encoded_buffer_len[ENCODED_BUFFER_COUNT];
   bool configured;
+  bool camera_started;
+  bool encoder_input_started;
+  bool encoder_output_started;
 } stream_ctx_t;
 
 static stream_ctx_t s_ctx = {
@@ -81,7 +88,9 @@ static stream_ctx_t s_ctx = {
     .m2m_fd = -1,
 };
 static QueueHandle_t s_encoded_queue;
+static SemaphoreHandle_t s_available_buffers;
 static TaskHandle_t s_stream_task_handle;
+/* Desired button state is separate from cancellation of the current session. */
 static volatile bool s_streaming;
 static volatile bool s_stop_requested;
 static volatile bool s_capture_running;
@@ -175,16 +184,28 @@ static esp_err_t configure_video(stream_ctx_t *ctx) {
   const uint32_t capture_fmt = V4L2_PIX_FMT_YUV420;
   struct v4l2_format fmt = {
       .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-      .fmt.pix =
-          {
-              .width = CONFIG_EXAMPLE_FRAME_WIDTH,
-              .height = CONFIG_EXAMPLE_FRAME_HEIGHT,
-              .pixelformat = capture_fmt,
-              .field = V4L2_FIELD_ANY,
-          },
   };
-  if (ioctl(ctx->cap_fd, VIDIOC_S_FMT, &fmt) != 0) {
-    ESP_LOGE(TAG, "set camera format failed");
+  if (ioctl(ctx->cap_fd, VIDIOC_G_FMT, &fmt) != 0) {
+    ESP_LOGE(TAG, "read native camera format failed");
+    return ESP_FAIL;
+  }
+  if (fmt.fmt.pix.width != CONFIG_EXAMPLE_FRAME_WIDTH ||
+      fmt.fmt.pix.height != CONFIG_EXAMPLE_FRAME_HEIGHT) {
+    ESP_LOGE(TAG,
+             "capture must match sensor native size %" PRIu32 "x%" PRIu32
+             "; configured %dx%d (no resizing in Jetson mode)",
+             fmt.fmt.pix.width, fmt.fmt.pix.height, CONFIG_EXAMPLE_FRAME_WIDTH,
+             CONFIG_EXAMPLE_FRAME_HEIGHT);
+    return ESP_ERR_INVALID_ARG;
+  }
+  fmt.fmt.pix.pixelformat = capture_fmt;
+  fmt.fmt.pix.field = V4L2_FIELD_ANY;
+  if (ioctl(ctx->cap_fd, VIDIOC_S_FMT, &fmt) != 0 ||
+      ioctl(ctx->cap_fd, VIDIOC_G_FMT, &fmt) != 0 ||
+      fmt.fmt.pix.pixelformat != capture_fmt ||
+      fmt.fmt.pix.width != CONFIG_EXAMPLE_FRAME_WIDTH ||
+      fmt.fmt.pix.height != CONFIG_EXAMPLE_FRAME_HEIGHT) {
+    ESP_LOGE(TAG, "set native YUV420 camera format failed");
     return ESP_FAIL;
   }
   ctx->width = fmt.fmt.pix.width;
@@ -301,6 +322,14 @@ static esp_err_t configure_video(stream_ctx_t *ctx) {
     }
   }
 
+  /* Bound capture shutdown even if the sensor or encoder stops producing. */
+  struct timeval dequeue_timeout = {.tv_sec = 1, .tv_usec = 0};
+  if (ioctl(ctx->cap_fd, VIDIOC_S_DQBUF_TIMEOUT, &dequeue_timeout) != 0 ||
+      ioctl(ctx->m2m_fd, VIDIOC_S_DQBUF_TIMEOUT, &dequeue_timeout) != 0) {
+    ESP_LOGE(TAG, "set capture/encoder dequeue timeout failed");
+    return ESP_FAIL;
+  }
+
   ctx->configured = true;
   ESP_LOGI(TAG,
            "configured %" PRIu32 "x%" PRIu32
@@ -321,6 +350,8 @@ static esp_err_t queue_mmap_buffer(int fd, enum v4l2_buf_type type,
   return ioctl(fd, VIDIOC_QBUF, &buf) == 0 ? ESP_OK : ESP_FAIL;
 }
 
+static void video_stop(stream_ctx_t *ctx);
+
 static esp_err_t video_start(stream_ctx_t *ctx) {
   ESP_RETURN_ON_ERROR(configure_video(ctx), TAG, "video configuration failed");
 
@@ -338,18 +369,21 @@ static esp_err_t video_start(stream_ctx_t *ctx) {
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(ctx->m2m_fd, VIDIOC_STREAMON, &type) != 0) {
     ESP_LOGE(TAG, "start encoder output stream failed");
-    return ESP_FAIL;
+    goto fail;
   }
+  ctx->encoder_output_started = true;
   type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
   if (ioctl(ctx->m2m_fd, VIDIOC_STREAMON, &type) != 0) {
     ESP_LOGE(TAG, "start encoder input stream failed");
-    return ESP_FAIL;
+    goto fail;
   }
+  ctx->encoder_input_started = true;
   type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(ctx->cap_fd, VIDIOC_STREAMON, &type) != 0) {
     ESP_LOGE(TAG, "start camera stream failed");
-    return ESP_FAIL;
+    goto fail;
   }
+  ctx->camera_started = true;
 
   for (int i = 0; i < SKIP_STARTUP_FRAME_COUNT; ++i) {
     struct v4l2_buffer buf = {
@@ -365,20 +399,33 @@ static esp_err_t video_start(stream_ctx_t *ctx) {
 
   ESP_LOGI(TAG, "video started");
   return ESP_OK;
+
+fail:
+  video_stop(ctx);
+  return ESP_FAIL;
 }
 
 static void video_stop(stream_ctx_t *ctx) {
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(ctx->cap_fd, VIDIOC_STREAMOFF, &type) != 0) {
-    ESP_LOGW(TAG, "stop camera stream failed");
+  if (ctx->camera_started) {
+    if (ioctl(ctx->cap_fd, VIDIOC_STREAMOFF, &type) != 0) {
+      ESP_LOGW(TAG, "stop camera stream failed");
+    }
+    ctx->camera_started = false;
   }
   type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  if (ioctl(ctx->m2m_fd, VIDIOC_STREAMOFF, &type) != 0) {
-    ESP_LOGW(TAG, "stop encoder input stream failed");
+  if (ctx->encoder_input_started) {
+    if (ioctl(ctx->m2m_fd, VIDIOC_STREAMOFF, &type) != 0) {
+      ESP_LOGW(TAG, "stop encoder input stream failed");
+    }
+    ctx->encoder_input_started = false;
   }
   type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(ctx->m2m_fd, VIDIOC_STREAMOFF, &type) != 0) {
-    ESP_LOGW(TAG, "stop encoder output stream failed");
+  if (ctx->encoder_output_started) {
+    if (ioctl(ctx->m2m_fd, VIDIOC_STREAMOFF, &type) != 0) {
+      ESP_LOGW(TAG, "stop encoder output stream failed");
+    }
+    ctx->encoder_output_started = false;
   }
   ESP_LOGI(TAG, "video stopped");
 }
@@ -415,13 +462,12 @@ static esp_err_t video_fb_get(stream_ctx_t *ctx, encoded_frame_t *frame) {
       .memory = V4L2_MEMORY_MMAP,
   };
   if (ioctl(ctx->m2m_fd, VIDIOC_DQBUF, &encoded) != 0) {
-    ioctl(ctx->cap_fd, VIDIOC_QBUF, &camera);
+    /* The encoder may still own this camera buffer after a timeout.
+     * End the session and stop the pipeline before reusing its storage. */
     return ESP_FAIL;
   }
 
   if (ioctl(ctx->m2m_fd, VIDIOC_DQBUF, &encoder_input) != 0) {
-    queue_mmap_buffer(ctx->m2m_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, encoded.index);
-    ioctl(ctx->cap_fd, VIDIOC_QBUF, &camera);
     return ESP_FAIL;
   }
   if (ioctl(ctx->cap_fd, VIDIOC_QBUF, &camera) != 0) {
@@ -429,9 +475,14 @@ static esp_err_t video_fb_get(stream_ctx_t *ctx, encoded_frame_t *frame) {
     return ESP_FAIL;
   }
 
-  if (encoded.index >= ctx->encoded_buffer_count || encoded.bytesused == 0 ||
-      (encoded.flags & V4L2_BUF_FLAG_ERROR)) {
-    queue_mmap_buffer(ctx->m2m_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, encoded.index);
+  if (encoded.index >= ctx->encoded_buffer_count) {
+    return ESP_FAIL;
+  }
+  if (encoded.bytesused == 0 || (encoded.flags & V4L2_BUF_FLAG_ERROR)) {
+    if (queue_mmap_buffer(ctx->m2m_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                          encoded.index) != ESP_OK) {
+      return ESP_FAIL;
+    }
     return ESP_ERR_INVALID_RESPONSE;
   }
 
@@ -442,12 +493,15 @@ static esp_err_t video_fb_get(stream_ctx_t *ctx, encoded_frame_t *frame) {
 }
 
 static void video_fb_return(stream_ctx_t *ctx, uint32_t index) {
-  if (index < ctx->encoded_buffer_count &&
+  if (index >= ctx->encoded_buffer_count ||
       queue_mmap_buffer(ctx->m2m_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, index) !=
           ESP_OK) {
     ESP_LOGE(TAG, "requeue encoded buffer %" PRIu32 " failed", index);
     s_stop_requested = true;
+    return;
   }
+  /* The driver owns this output buffer again; encoding may now use it. */
+  xSemaphoreGive(s_available_buffers);
 }
 
 static esp_err_t send_all(int sock, const uint8_t *data, size_t len) {
@@ -475,6 +529,9 @@ static esp_err_t send_frame(int sock, const uint8_t *data, uint32_t len) {
 }
 
 static int connect_jetson(void) {
+  if (!s_streaming || s_stop_requested) {
+    return -1;
+  }
   int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   if (sock < 0) {
     ESP_LOGE(TAG, "socket creation failed");
@@ -501,7 +558,63 @@ static int connect_jetson(void) {
     close(sock);
     return -1;
   }
-  if (connect(sock, (struct sockaddr *)&dest, sizeof(dest)) != 0) {
+  int original_flags = fcntl(sock, F_GETFL, 0);
+  if (original_flags < 0 ||
+      fcntl(sock, F_SETFL, original_flags | O_NONBLOCK) < 0) {
+    close(sock);
+    return -1;
+  }
+
+  int result = connect(sock, (struct sockaddr *)&dest, sizeof(dest));
+  if (result < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
+    close(sock);
+    return -1;
+  }
+
+  const int64_t deadline_us =
+      esp_timer_get_time() + (int64_t)CONFIG_EXAMPLE_TCP_SEND_TIMEOUT_MS * 1000;
+  while (result < 0) {
+    if (!s_streaming || s_stop_requested ||
+        esp_timer_get_time() >= deadline_us) {
+      close(sock);
+      return -1;
+    }
+
+    fd_set writable;
+    fd_set errors;
+    FD_ZERO(&writable);
+    FD_ZERO(&errors);
+    FD_SET(sock, &writable);
+    FD_SET(sock, &errors);
+    struct timeval poll_timeout = {
+        .tv_sec = 0,
+        .tv_usec = TCP_CONNECT_POLL_MS * 1000,
+    };
+    int ready = select(sock + 1, NULL, &writable, &errors, &poll_timeout);
+    if (ready < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      close(sock);
+      return -1;
+    }
+    if (ready == 0) {
+      continue;
+    }
+
+    int socket_error = 0;
+    socklen_t error_len = sizeof(socket_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) !=
+            0 ||
+        socket_error != 0) {
+      close(sock);
+      return -1;
+    }
+    result = 0;
+  }
+
+  if (!s_streaming || s_stop_requested ||
+      fcntl(sock, F_SETFL, original_flags) < 0) {
     close(sock);
     return -1;
   }
@@ -513,9 +626,20 @@ static void capture_task(void *arg) {
   s_capture_running = true;
 
   while (!s_stop_requested) {
+    /* CAPTURE DQBUF triggers encoding immediately and fails if every output
+     * buffer is held by the sender/queue. Reserve one before feeding input. */
+    if (xSemaphoreTake(s_available_buffers, pdMS_TO_TICKS(50)) != pdTRUE) {
+      continue;
+    }
+    if (s_stop_requested) {
+      xSemaphoreGive(s_available_buffers);
+      break;
+    }
     encoded_frame_t frame;
     esp_err_t ret = video_fb_get(ctx, &frame);
     if (ret == ESP_ERR_INVALID_RESPONSE) {
+      /* No output was consumed, or video_fb_get already requeued it. */
+      xSemaphoreGive(s_available_buffers);
       continue;
     }
     if (ret != ESP_OK) {
@@ -547,11 +671,26 @@ static void drain_encoded_queue(stream_ctx_t *ctx) {
 }
 
 static void run_connection(stream_ctx_t *ctx, int sock) {
+  if (!s_streaming || s_stop_requested) {
+    return;
+  }
   xQueueReset(s_encoded_queue);
   s_encoded_frames = 0;
   if (video_start(ctx) != ESP_OK) {
     s_stop_requested = true;
     return;
+  }
+  if (!s_streaming || s_stop_requested) {
+    video_stop(ctx);
+    return;
+  }
+
+  /* The previous producer has exited before a new connection runs. Reset
+   * credits only after video_start has requeued every driver output buffer. */
+  while (xSemaphoreTake(s_available_buffers, 0) == pdTRUE) {
+  }
+  for (uint32_t i = 0; i < ctx->encoded_buffer_count; ++i) {
+    xSemaphoreGive(s_available_buffers);
   }
 
   s_capture_running = true;
@@ -621,12 +760,23 @@ static void stream_task(void *arg) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    while (s_streaming && !s_stop_requested) {
+    while (s_streaming) {
+      /* Only this task clears cancellation, after the old capture task and
+       * pipeline have completely stopped. A quick third press queues a start.
+       */
+      s_stop_requested = false;
       int sock = connect_jetson();
       if (sock < 0) {
+        if (!s_streaming || s_stop_requested) {
+          continue;
+        }
         ESP_LOGW(TAG, "connect to %s:%d failed; retrying",
                  CONFIG_EXAMPLE_JETSON_IP, CONFIG_EXAMPLE_JETSON_PORT);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_EXAMPLE_RECONNECT_DELAY_MS));
+        continue;
+      }
+      if (!s_streaming || s_stop_requested) {
+        close(sock);
         continue;
       }
 
@@ -637,15 +787,12 @@ static void stream_task(void *arg) {
       close(sock);
       s_sock = -1;
 
-      if (s_streaming && s_stop_requested) {
+      if (s_streaming) {
         /* A clean restart ensures the receiver gets fresh SPS/PPS/IDR. */
-        s_stop_requested = false;
         vTaskDelay(pdMS_TO_TICKS(CONFIG_EXAMPLE_RECONNECT_DELAY_MS));
       }
     }
 
-    s_streaming = false;
-    s_stop_requested = false;
     ESP_LOGI(TAG, "stream stopped");
   }
 }
@@ -653,6 +800,10 @@ static void stream_task(void *arg) {
 static void button_task(void *arg) {
   TaskHandle_t stream_handle = (TaskHandle_t)arg;
   const int gpio = CONFIG_EXAMPLE_STREAM_BUTTON_GPIO;
+  if (gpio < 0 || gpio >= 64 || !GPIO_IS_VALID_GPIO(gpio)) {
+    ESP_LOGE(TAG, "invalid stream button GPIO: %d", gpio);
+    abort();
+  }
   gpio_config_t io = {
       .pin_bit_mask = (1ULL << gpio),
       .mode = GPIO_MODE_INPUT,
@@ -680,7 +831,6 @@ static void button_task(void *arg) {
 
     if (level == 0) {
       if (!s_streaming) {
-        s_stop_requested = false;
         s_streaming = true;
         xTaskNotifyGive(stream_handle);
       } else {
@@ -718,16 +868,19 @@ void app_main(void) {
 #if CONFIG_EXAMPLE_CONNECT_WIFI
   /* Browser mode already does this. Wi-Fi modem power save adds latency and
    * throttles sustained 4 Mbps uploads, so keep the radio always on. */
-  esp_err_t ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
-  if (ps_ret != ESP_OK) {
-    ESP_LOGW(TAG, "could not disable Wi-Fi power saving: %s",
-             esp_err_to_name(ps_ret));
+  esp_err_t wifi_ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
+  if (wifi_ps_ret != ESP_OK) {
+    ESP_LOGW(TAG, "disable Wi-Fi modem sleep failed: %s",
+             esp_err_to_name(wifi_ps_ret));
+  } else {
+    ESP_LOGI(TAG, "Wi-Fi modem sleep disabled (WIFI_PS_NONE)");
   }
 #endif
 
   s_encoded_queue = xQueueCreate(ENCODED_BUFFER_COUNT, sizeof(encoded_frame_t));
-  if (s_encoded_queue == NULL) {
-    ESP_LOGE(TAG, "create encoded queue failed");
+  s_available_buffers = xSemaphoreCreateCounting(s_ctx.encoded_buffer_count, 0);
+  if (s_encoded_queue == NULL || s_available_buffers == NULL) {
+    ESP_LOGE(TAG, "create encoded queue/buffer credits failed");
     abort();
   }
 
@@ -740,15 +893,17 @@ void app_main(void) {
     abort();
   }
 
-  ESP_LOGI(TAG, "ready: press GPIO %d button to stream %dx%d@%d H.264 to %s:%d",
-           CONFIG_EXAMPLE_STREAM_BUTTON_GPIO, CONFIG_EXAMPLE_FRAME_WIDTH,
-           CONFIG_EXAMPLE_FRAME_HEIGHT, CONFIG_EXAMPLE_FRAME_FPS,
-           CONFIG_EXAMPLE_JETSON_IP, CONFIG_EXAMPLE_JETSON_PORT);
+  ESP_LOGI(TAG, "ready: %dx%d@%d H.264 to %s:%d, toggle button GPIO %d",
+           CONFIG_EXAMPLE_FRAME_WIDTH, CONFIG_EXAMPLE_FRAME_HEIGHT,
+           CONFIG_EXAMPLE_FRAME_FPS, CONFIG_EXAMPLE_JETSON_IP,
+           CONFIG_EXAMPLE_JETSON_PORT, CONFIG_EXAMPLE_STREAM_BUTTON_GPIO);
 
 #if CONFIG_EXAMPLE_AUTOSTART_STREAM
-  s_stop_requested = false;
   s_streaming = true;
   xTaskNotifyGive(stream_handle);
   ESP_LOGI(TAG, "auto-starting camera stream");
+#else
+  ESP_LOGI(TAG, "press GPIO %d button to start streaming",
+           CONFIG_EXAMPLE_STREAM_BUTTON_GPIO);
 #endif
 }
