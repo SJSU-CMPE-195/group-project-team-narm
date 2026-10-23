@@ -5,7 +5,7 @@ import os
 import queue
 import threading
 import time
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 
@@ -161,6 +161,7 @@ def start_stats_reporter(
     payload_q: queue.Queue,
     decoded_q: queue.Queue,
     interval: int,
+    extra: Optional[Callable[[], str]] = None,
 ) -> None:
     def report() -> None:
         previous = stats.snapshot()
@@ -189,6 +190,10 @@ def start_stats_reporter(
                 f"queues(payload={payload_q.qsize()},decoded={decoded_q.qsize()}) "
                 f"latency={current['latency_ms']:.1f}ms"
             )
+            if extra is not None:
+                timing = extra()
+                if timing:
+                    print(f"[timing] per inferred frame: {timing}")
             previous = current
             previous_ts = now
 
@@ -201,7 +206,7 @@ def main() -> None:
     preview_http = env_bool("PREVIEW_HTTP", False)
     preview_port = env_int("PREVIEW_PORT", 8000)
     preview_max_sentence = env_int("PREVIEW_MAX_SENTENCE", 5)
-    preview_fps = env_int("PREVIEW_FPS", 12)
+    preview_fps = env_int("PREVIEW_FPS", 30)
     preview_width = env_int("PREVIEW_WIDTH", 640)
     preview_quality = env_int("PREVIEW_JPEG_QUALITY", 75)
     preview_landmarks = env_bool("PREVIEW_LANDMARKS", True)
@@ -231,6 +236,9 @@ def main() -> None:
         sequence_length=sequence_length,
         threshold=threshold,
         stable_n=stable_n,
+        model_complexity=env_int("MODEL_COMPLEXITY", 0),
+        infer_width=env_int("INFER_WIDTH", 640),
+        repeat_reset=env_int("REPEAT_RESET", 15),
     )
     if payload_format == "jpeg":
         from decode_jpeg import JpegPayloadDecoder
@@ -255,11 +263,9 @@ def main() -> None:
     )
     stats = PipelineStats()
     latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
-    landmarks_from_results = None
 
     if preview_http:
         try:
-            from holistic_lstm_infer import landmarks_from_results
             from preview_http import PreviewHTTPServer
 
             preview_server = PreviewHTTPServer(
@@ -330,7 +336,13 @@ def main() -> None:
         name="tcp-ingest",
         daemon=True,
     ).start()
-    start_stats_reporter(stats, payload_q, decoded_q, max(stats_interval, 1))
+    start_stats_reporter(
+        stats,
+        payload_q,
+        decoded_q,
+        max(stats_interval, 1),
+        extra=infer.timer.summary_and_reset,
+    )
 
     print(
         f"[main] listening {host}:{port}, payload={payload_format}, "
@@ -349,9 +361,7 @@ def main() -> None:
 
             if preview_http:
                 try:
-                    landmarks = None
-                    if preview_landmarks and infer.last_results is not None:
-                        landmarks = landmarks_from_results(infer.last_results)
+                    landmarks = infer.preview_landmarks() if preview_landmarks else None
                     latest.set_inference(infer.last_probs, landmarks)
                 except Exception:
                     pass

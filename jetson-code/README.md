@@ -328,10 +328,13 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 - **`PREVIEW_HTTP`** (default `0`) — if `1`, start a local MJPEG preview server (browser view of the decoded stream)
 - **`PREVIEW_PORT`** (default `8000`) — port for the MJPEG preview server
 - **`PREVIEW_MAX_SENTENCE`** (default `5`) — max number of gloss tokens shown in the preview “sentence” bar
-- **`PREVIEW_FPS`** (default `12`) — max refresh rate of the preview page (decoding and inference are not limited by this)
+- **`PREVIEW_FPS`** (default `30`) — max refresh rate of the preview page (decoding and inference are not limited by this)
 - **`PREVIEW_WIDTH`** (default `640`) — preview width in pixels; frames are shrunk before color conversion and JPEG encoding (`0` keeps the decoded size)
 - **`PREVIEW_JPEG_QUALITY`** (default `75`) — preview JPEG quality
 - **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose, hands, face) on the preview
+- **`MODEL_COMPLEXITY`** (default `0`) — MediaPipe Holistic complexity: `0` fastest, `1` MediaPipe's own default, `2` slowest. `0` is much faster on the Nano but its landmarks differ slightly from `1`; if accuracy drops, try `1`
+- **`INFER_WIDTH`** (default `640`) — frames are shrunk to this width before MediaPipe (`0` = full size). Landmarks are normalized, so the model input does not change
+- **`REPEAT_RESET`** (default `15`) — after this many inferences without a confident new word, the last word is forgotten so the same word can be reported again (`0` = never)
 - **`SEQUENCE_LENGTH`** (default `30`)
 - **`STABLE_N`** (default `10`)
 - **`THRESHOLD`** (default `0.5`)
