@@ -15,7 +15,8 @@ class PayloadFrame:
     stream_id: int = 0
 
 
-# Backward-compatible name used by older code.
+# Preserve imports used by older H.264-only receivers. PayloadFrame also
+# describes the legacy JPEG payloads supported by main.py.
 H264Frame = PayloadFrame
 
 

@@ -101,9 +101,12 @@ idf.py -p <PORT> flash monitor
 ### Running the POC
 1. Power on the ESP32-P4-WIFI6 with the OV5647 connected via MIPI-CSI.
 2. Build and flash the firmware from `esp32-p4/`.
-3. The P4 captures video, hardware-encodes H.264, and streams it through its
-   ESP32-C6 Wi-Fi coprocessor.
-4. On the Jetson Nano, run the inference server to receive the stream and perform ASL translation.
+3. On the Jetson, start the hotspot `ASLHotspot` and run `jetson-code/main.py`
+   with the trained model. The default receiver listens on TCP port 5000.
+4. After the board joins Wi-Fi, it automatically sends native 1920x1080 H.264
+   to `10.42.0.1:5000` through the ESP32-C6 Wi-Fi coprocessor. Press its BOOT
+   button (GPIO35) to stop and close the connection; press again to restart.
+   Keep BOOT released during reset. See `docs/esp32_jetson_streaming_runbook.md`.
 
 ### What's Next
 - Optimize latency for real-time performance

@@ -54,24 +54,42 @@ Use ESP-IDF 5.4 or newer:
 
 Configure:
 
-- Example Connection Configuration: Jetson hotspot/LAN SSID and password.
-- Example Video Initialization Configuration: custom board, MIPI-CSI, OV5647,
-  and the Waveshare board's SCCB/control settings.
-- H.264 Stream Example Configuration: Jetson IP, port 5000, button GPIO,
-  resolution, FPS, bitrate, GOP, and QP range.
+- Example Connection Configuration: SSID `ASLHotspot`, password
+  `YourStrongPassphrase`.
+- Example Video Initialization Configuration: keep the working MIPI-CSI,
+  OV5647, and Waveshare SCCB/control settings.
+- Camera Streaming Configuration -> Streaming mode: **Send H.264 over TCP to Jetson**.
+- Jetson IP `10.42.0.1`, TCP port `5000`.
+- Stream toggle button GPIO `35`: the Waveshare ESP32-P4-WIFI6 onboard BOOT
+  button, confirmed in the [board schematic, page 1](https://files.waveshare.com/wiki/ESP32-P4-WIFI6/ESP32-P4-WIFI6-datasheet.pdf).
+  Release BOOT during reset; use it after the firmware prints `ready`.
+  For an external momentary switch, use a free configured GPIO and GND.
+  The firmware enables the internal pull-up and detects an active-low press.
+- Enable **Start streaming automatically after Wi-Fi connects**.
+- Frame width `1920`, height `1080`, FPS `30`. The sender uses native capture
+  without resizing. Start with 4 Mbps, I-frame period 30, QP 25 to 35.
 
-Do not commit real Wi-Fi credentials.
+These demo values are in `esp32-p4/sdkconfig.defaults`; existing `sdkconfig`
+settings take precedence, so check them before rebuilding. Avoid repeating
+`set-target` for an already configured ESP32-P4 because it resets local settings.
 
 ## 4. Build, flash, and start
 
     idf.py build
     idf.py -p <PORT> flash monitor
 
-Press the configured stream button. Expected ESP logs:
+After Wi-Fi connects, streaming starts automatically. Expected ESP logs:
+
+    Wi-Fi modem sleep disabled (WIFI_PS_NONE)
+    auto-starting camera stream
 
     connected to Jetson at 10.42.0.1:5000
     video started
     stats: encoded=... sent=... fps=... bitrate=... queue=... age=...ms
+
+The demo target is roughly 27 to 30 measured FPS. Press BOOT to stop
+capture and close the connection; expect `stream stopped`. Press again to
+reconnect. Measure this on the board; a successful build does not verify FPS.
 
 Expected Jetson logs:
 
@@ -104,8 +122,8 @@ Start with:
 - QP range 25 to 35
 
 If hand/finger detail is insufficient, increase bitrate before increasing
-resolution. If inference is slow, resize/crop on the Jetson or reduce capture
-resolution while keeping 30 FPS.
+resolution. If inference is slow, resize/crop on the Jetson while keeping the
+ESP32 sender at the sensor's native 1920x1080 capture size.
 
 ## Troubleshooting
 
@@ -118,8 +136,22 @@ resolution while keeping 30 FPS.
 ### TCP repeatedly reconnects
 
 - Confirm the Jetson IP and port.
-- Start main.py before pressing the stream button.
+- Start main.py before powering/resetting the board, or let the sender retry
+  until the receiver is listening.
 - Check firewall rules and the ESP TCP send-timeout setting.
+
+If `connected to Jetson` and `video started` are followed by `no valid buffer`
+and `capture/encode failed`, the connection succeeded but the ESP encoder ran
+out of queued output buffers. Rebuild and flash the firmware with the encoded
+buffer availability guard. It waits for the sender to return a buffer before
+encoding another frame, keeping all H.264 access units in order even when the
+Jetson or TCP sender is slower than capture.
+
+Once the ESP stream stays connected, compare its `stats:` FPS with the Jetson's
+`[stats]` receive/decode/inference counters. The `main.py` browser preview is
+updated by the inference loop, so a slow inference rate also slows the preview.
+Both Jetson MJPEG preview implementations additionally wait 50 ms between JPEG
+responses; browser preview FPS is separate from ESP encoded/sent FPS.
 
 ### H.264 decoder errors after connect
 
