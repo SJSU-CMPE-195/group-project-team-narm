@@ -292,10 +292,15 @@ Set the Jetson IP address to `10.42.0.1` and TCP port to `5000`.
 
 Use the **actual** IPv4 from `ip -4 addr` on the AP interface if it differs.
 
-**3. Camera/codec mode**
+**3. Streaming mode**
 
-The canonical firmware always uses the OV5647 MIPI-CSI camera and P4 hardware
-H.264 encoder. Configure resolution, FPS, bitrate, GOP, and QP in menuconfig.
+Under **Camera Streaming Configuration → Streaming mode**, choose
+**Send H.264 over TCP to Jetson** (the checked-in `sdkconfig.defaults` selects it; an existing
+`sdkconfig` keeps its old value until you change it in menuconfig or delete it). The other modes
+(browser H.264 and browser MJPEG) serve a web page from the ESP32 and send nothing to the Jetson, so
+they are for camera-only previews at `http://<esp32-ip>/` and cannot be used for translation.
+The firmware always uses the OV5647 MIPI-CSI camera and P4 hardware H.264 encoder. Configure
+resolution, FPS, bitrate, GOP, and QP in menuconfig.
 
 Rebuild and flash the firmware after changing these values.
 
@@ -323,6 +328,10 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 - **`PREVIEW_HTTP`** (default `0`) — if `1`, start a local MJPEG preview server (browser view of the decoded stream)
 - **`PREVIEW_PORT`** (default `8000`) — port for the MJPEG preview server
 - **`PREVIEW_MAX_SENTENCE`** (default `5`) — max number of gloss tokens shown in the preview “sentence” bar
+- **`PREVIEW_FPS`** (default `12`) — max refresh rate of the preview page (decoding and inference are not limited by this)
+- **`PREVIEW_WIDTH`** (default `640`) — preview width in pixels; frames are shrunk before color conversion and JPEG encoding (`0` keeps the decoded size)
+- **`PREVIEW_JPEG_QUALITY`** (default `75`) — preview JPEG quality
+- **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose, hands, face) on the preview
 - **`SEQUENCE_LENGTH`** (default `30`)
 - **`STABLE_N`** (default `10`)
 - **`THRESHOLD`** (default `0.5`)
@@ -360,6 +369,17 @@ Then open the preview page in a browser:
 
 - If you are using the Jetson as a Wi‑Fi hotspot with NetworkManager (common default gateway): **`http://10.42.0.1:8000/`**
 - Otherwise: use the actual IPv4 shown by `ip -4 addr show dev <your_ap_iface>` and open `http://<that_ip>:8000/`
+
+What the page shows: the decoded video (every frame, not only the ones the model has processed),
+the MediaPipe skeleton, the recognized-word sentence bar, and the per-class probability bars. The video
+is shrunk to `PREVIEW_WIDTH` and refreshed at most `PREVIEW_FPS` times per second, and each frame is
+JPEG-encoded once and shared by all open tabs. Skeleton and probabilities update at the model's own
+rate, so they can lag the video slightly.
+
+Camera-only check (no model, no TensorFlow): `python3 standalone_preview.py` serves the same kind of
+page on port 8000 and prints a `[stats] decoded=...fps rx=...Mbps` line every 5 seconds. Options:
+`--width`, `--fps`, `--quality`, `--tcp-port`, `--http-port`. Never open the TCP port (5000) in a
+browser; it is only for the ESP32.
 
 Notes:
 

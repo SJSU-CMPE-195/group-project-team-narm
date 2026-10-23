@@ -30,6 +30,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -714,6 +715,15 @@ void app_main(void) {
   ESP_ERROR_CHECK(configure_video(&s_ctx));
 
   ESP_ERROR_CHECK(example_connect());
+#if CONFIG_EXAMPLE_CONNECT_WIFI
+  /* Browser mode already does this. Wi-Fi modem power save adds latency and
+   * throttles sustained 4 Mbps uploads, so keep the radio always on. */
+  esp_err_t ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
+  if (ps_ret != ESP_OK) {
+    ESP_LOGW(TAG, "could not disable Wi-Fi power saving: %s",
+             esp_err_to_name(ps_ret));
+  }
+#endif
 
   s_encoded_queue = xQueueCreate(ENCODED_BUFFER_COUNT, sizeof(encoded_frame_t));
   if (s_encoded_queue == NULL) {

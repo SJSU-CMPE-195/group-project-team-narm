@@ -36,12 +36,33 @@ class LatestState:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     latest_frame_bgr: Optional[np.ndarray] = None
+    latest_frame_rgb: Optional[np.ndarray] = None
     latest_sentence: List[str] = field(default_factory=list)
     latest_probs: Optional[np.ndarray] = None
+    latest_landmarks: Optional[dict] = None
+    # Bumped on every change so the preview can skip re-encoding unchanged data.
+    version: int = 0
 
     def update_frame(self, frame_bgr: np.ndarray) -> None:
         with self._lock:
             self.latest_frame_bgr = frame_bgr.copy()
+            self.version += 1
+
+    def update_frame_rgb(self, frame_rgb: np.ndarray) -> None:
+        """Store the newest decoded frame without copying or converting it.
+
+        Called from the decode thread for every frame, so the preview shows
+        all decoded video and does not wait for MediaPipe/LSTM inference.
+        """
+        with self._lock:
+            self.latest_frame_rgb = frame_rgb
+            self.version += 1
+
+    def set_inference(self, probs: Optional[np.ndarray], landmarks: Optional[dict]) -> None:
+        with self._lock:
+            self.latest_probs = None if probs is None else np.array(probs, copy=True)
+            self.latest_landmarks = landmarks
+            self.version += 1
 
     def push_gloss(self, gloss: str) -> None:
         with self._lock:
@@ -50,6 +71,22 @@ class LatestState:
             self.latest_sentence.append(gloss)
             if len(self.latest_sentence) > self.max_sentence:
                 self.latest_sentence = self.latest_sentence[-self.max_sentence :]
+            self.version += 1
+
+    def preview_snapshot(self) -> tuple:
+        """(version, frame_rgb, sentence, probs, actions, landmarks) for the preview.
+
+        The frame array is shared, not copied; callers must only read it.
+        """
+        with self._lock:
+            return (
+                self.version,
+                self.latest_frame_rgb,
+                list(self.latest_sentence),
+                None if self.latest_probs is None else np.array(self.latest_probs, copy=True),
+                list(self.actions),
+                self.latest_landmarks,
+            )
 
     def snapshot(
         self,
@@ -164,6 +201,10 @@ def main() -> None:
     preview_http = env_bool("PREVIEW_HTTP", False)
     preview_port = env_int("PREVIEW_PORT", 8000)
     preview_max_sentence = env_int("PREVIEW_MAX_SENTENCE", 5)
+    preview_fps = env_int("PREVIEW_FPS", 12)
+    preview_width = env_int("PREVIEW_WIDTH", 640)
+    preview_quality = env_int("PREVIEW_JPEG_QUALITY", 75)
+    preview_landmarks = env_bool("PREVIEW_LANDMARKS", True)
     payload_format = env_str("PAYLOAD_FORMAT", "h264").strip().lower()
     stats_interval = env_int("STATS_INTERVAL_SEC", 5)
 
@@ -214,15 +255,20 @@ def main() -> None:
     )
     stats = PipelineStats()
     latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
-    cv2_module = None
+    landmarks_from_results = None
 
     if preview_http:
         try:
-            import cv2 as cv2_module
+            from holistic_lstm_infer import landmarks_from_results
             from preview_http import PreviewHTTPServer
 
             preview_server = PreviewHTTPServer(
-                latest_state=latest, host="0.0.0.0", port=preview_port
+                latest_state=latest,
+                host="0.0.0.0",
+                port=preview_port,
+                max_fps=float(preview_fps),
+                width=preview_width,
+                quality=preview_quality,
             )
             threading.Thread(
                 target=preview_server.serve_forever,
@@ -262,6 +308,9 @@ def main() -> None:
 
             for decoded in decoded_frames:
                 stats.add("decoded")
+                if preview_http:
+                    # Show every decoded frame; do not wait for inference.
+                    latest.update_frame_rgb(decoded.rgb)
                 work = DecodedWorkFrame(
                     rgb=decoded.rgb,
                     received_ts=payload.received_ts,
@@ -291,19 +340,21 @@ def main() -> None:
     try:
         while True:
             work = decoded_q.get()
-            if preview_http:
-                try:
-                    latest.update_frame(
-                        cv2_module.cvtColor(work.rgb, cv2_module.COLOR_RGB2BGR)
-                    )
-                except Exception:
-                    pass
 
             try:
                 prediction = infer.push_frame(work.rgb)
             except Exception as exc:
                 print(f"[infer] frame failed: {exc!r}")
                 continue
+
+            if preview_http:
+                try:
+                    landmarks = None
+                    if preview_landmarks and infer.last_results is not None:
+                        landmarks = landmarks_from_results(infer.last_results)
+                    latest.set_inference(infer.last_probs, landmarks)
+                except Exception:
+                    pass
 
             stats.add("inferred")
             stats.set_latency((time.monotonic() - work.received_ts) * 1000.0)

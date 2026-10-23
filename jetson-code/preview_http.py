@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+from jpeg_broadcast import JpegBroadcaster
+
+_PLACEHOLDER_VERSION = -1
 
 
 def _draw_overlay(
@@ -18,17 +21,23 @@ def _draw_overlay(
 ) -> np.ndarray:
     out = frame_bgr
     h, w = out.shape[:2]
+    # Text was laid out for ~960 px wide frames; shrink it for smaller previews.
+    scale = max(0.5, min(1.0, w / 960.0))
+    bar_h = int(40 * scale)
+    font_main = 1.0 * scale
+    font_prob = 0.9 * scale
+    thick = 2 if scale >= 0.75 else 1
 
     # Top sentence bar (notebook-style).
-    cv2.rectangle(out, (0, 0), (w, 40), (245, 117, 16), -1)
+    cv2.rectangle(out, (0, 0), (w, bar_h), (245, 117, 16), -1)
     cv2.putText(
         out,
         " ".join(sentence),
-        (3, 30),
+        (3, int(30 * scale)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1,
+        font_main,
         (255, 255, 255),
-        2,
+        thick,
         cv2.LINE_AA,
     )
 
@@ -42,14 +51,16 @@ def _draw_overlay(
             (16, 245, 117),
             (117, 16, 245),
         ]
-        max_w = min(300, w // 2)
+        max_w = min(int(300 * scale), w // 2)
+        row = int(40 * scale)
+        top = bar_h + int(20 * scale)
         for i, action in enumerate(actions):
             if i >= len(probs):
                 break
             p = float(probs[i])
             p = 0.0 if p < 0.0 else 1.0 if p > 1.0 else p
-            y0 = 60 + i * 40
-            y1 = 90 + i * 40
+            y0 = top + i * row
+            y1 = y0 + int(30 * scale)
             if y1 > h:
                 break
             cv2.rectangle(out, (0, y0), (int(p * max_w), y1), colors[i % len(colors)], -1)
@@ -58,23 +69,67 @@ def _draw_overlay(
                 action,
                 (3, y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
+                font_prob,
                 (255, 255, 255),
-                2,
+                thick,
                 cv2.LINE_AA,
             )
 
     return out
 
 
-def _placeholder_frame(width: int = 960, height: int = 540) -> np.ndarray:
+def _connections():
+    """MediaPipe skeleton connections, or empty lists if mediapipe is unavailable."""
+    try:
+        import mediapipe as mp  # local import: the preview must still work without it
+
+        holistic = mp.solutions.holistic
+        return (
+            sorted(tuple(int(i) for i in c) for c in holistic.POSE_CONNECTIONS),
+            sorted(tuple(int(i) for i in c) for c in holistic.HAND_CONNECTIONS),
+        )
+    except Exception:
+        return [], []
+
+
+def _draw_landmarks(
+    frame_bgr: np.ndarray,
+    landmarks: Optional[dict],
+    pose_conn: Sequence[Tuple[int, int]],
+    hand_conn: Sequence[Tuple[int, int]],
+) -> None:
+    """Draw the skeleton MediaPipe produced for the model (normalized x, y)."""
+    if not landmarks:
+        return
+    h, w = frame_bgr.shape[:2]
+
+    def px(pt):
+        return int(pt[0] * w), int(pt[1] * h)
+
+    def draw(points, connections, color, radius):
+        if not points:
+            return
+        for a, b in connections:
+            if a < len(points) and b < len(points):
+                cv2.line(frame_bgr, px(points[a]), px(points[b]), color, 1, cv2.LINE_AA)
+        for pt in points:
+            cv2.circle(frame_bgr, px(pt), radius, color, -1, cv2.LINE_AA)
+
+    draw(landmarks.get("pose"), pose_conn, (0, 200, 255), 3)
+    draw(landmarks.get("lh"), hand_conn, (0, 255, 0), 2)
+    draw(landmarks.get("rh"), hand_conn, (255, 128, 0), 2)
+    for pt in landmarks.get("face") or []:
+        cv2.circle(frame_bgr, px(pt), 1, (200, 200, 200), -1)
+
+
+def _placeholder_frame(width: int = 640, height: int = 360) -> np.ndarray:
     img = np.zeros((height, width, 3), dtype=np.uint8)
     cv2.putText(
         img,
         "Preview running - waiting for frames...",
-        (30, height // 2),
+        (20, height // 2),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
+        0.8,
         (255, 255, 255),
         2,
         cv2.LINE_AA,
@@ -82,11 +137,13 @@ def _placeholder_frame(width: int = 960, height: int = 540) -> np.ndarray:
     return img
 
 
-def _jpeg_bytes(frame_bgr: np.ndarray, *, quality: int = 80) -> bytes:
-    ok, buf = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
-    if not ok:
-        raise RuntimeError("cv2.imencode('.jpg') failed")
-    return buf.tobytes()
+def _downscale_to_bgr(frame_rgb: np.ndarray, width: int) -> np.ndarray:
+    """Shrink first (INTER_AREA), then convert color, so both steps touch fewer pixels."""
+    h, w = frame_rgb.shape[:2]
+    if width > 0 and w > width:
+        new_h = max(1, int(round(h * width / float(w))))
+        frame_rgb = cv2.resize(frame_rgb, (width, new_h), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
 
 @dataclass(frozen=True)
@@ -94,9 +151,33 @@ class PreviewHTTPServer:
     latest_state: object
     host: str = "0.0.0.0"
     port: int = 8000
+    max_fps: float = 12.0   # page refresh cap; decoding and inference are unaffected
+    width: int = 640        # preview width in px (0 = keep decoded size)
+    quality: int = 75       # JPEG quality
+
+    def _make_render(self):
+        latest_state = self.latest_state
+        width = int(self.width)
+        pose_conn, hand_conn = _connections()
+
+        def render(last_version):
+            version, frame_rgb, sentence, probs, actions, landmarks = latest_state.preview_snapshot()
+            if frame_rgb is None:
+                if last_version == _PLACEHOLDER_VERSION:
+                    return None
+                return _PLACEHOLDER_VERSION, _placeholder_frame()
+            if version == last_version:
+                return None
+            frame_bgr = _downscale_to_bgr(frame_rgb, width)
+            _draw_landmarks(frame_bgr, landmarks, pose_conn, hand_conn)
+            frame_bgr = _draw_overlay(frame_bgr, sentence=sentence, actions=actions, probs=probs)
+            return version, frame_bgr
+
+        return render
 
     def serve_forever(self) -> None:
-        latest_state = self.latest_state
+        broadcaster = JpegBroadcaster(self._make_render(), max_fps=self.max_fps, quality=self.quality)
+        broadcaster.start()
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, fmt: str, *args) -> None:
@@ -131,39 +212,20 @@ class PreviewHTTPServer:
                     self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                     self.end_headers()
 
+                    seq = 0
                     while True:
                         try:
-                            frame, sentence, probs, actions = latest_state.snapshot()
-                            if frame is None:
-                                frame = _placeholder_frame()
-                                sentence = ["(waiting)"]
-                                probs = None
-                                actions = []
-
-                            frame = _draw_overlay(
-                                frame,
-                                sentence=sentence,
-                                actions=actions,
-                                probs=probs,
-                            )
-                            jpg = _jpeg_bytes(frame, quality=80)
-
+                            seq, jpg = broadcaster.wait_for_next(seq, timeout=2.0)
+                            if jpg is None:
+                                continue
                             self.wfile.write(b"--frame\r\n")
                             self.wfile.write(b"Content-Type: image/jpeg\r\n")
                             self.wfile.write(f"Content-Length: {len(jpg)}\r\n\r\n".encode("utf-8"))
                             self.wfile.write(jpg)
                             self.wfile.write(b"\r\n")
                             self.wfile.flush()
-
-                            time.sleep(0.05)  # ~20 fps max; keeps CPU reasonable
-                        except BrokenPipeError:
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                             return
-                        except ConnectionResetError:
-                            return
-                        except Exception:
-                            # If anything transient happens, keep the stream alive.
-                            time.sleep(0.2)
-                    return
 
                 self.send_response(404)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -171,5 +233,5 @@ class PreviewHTTPServer:
                 self.wfile.write(b"not found")
 
         httpd = ThreadingHTTPServer((self.host, int(self.port)), Handler)
+        httpd.daemon_threads = True
         httpd.serve_forever()
-

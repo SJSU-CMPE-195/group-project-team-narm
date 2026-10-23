@@ -37,6 +37,26 @@ def extract_keypoints(results) -> np.ndarray:
     return np.concatenate([pose, face, lh, rh])
 
 
+def landmarks_from_results(results, face_stride: int = 3) -> dict:
+    """Normalized (x, y) points for drawing a skeleton preview.
+
+    Only used when the preview is on; it does not affect the model input.
+    Keys: pose, face (every `face_stride`-th point), lh, rh. Missing parts are [].
+    """
+
+    def points(landmarks, stride: int = 1):
+        if landmarks is None:
+            return []
+        return [(p.x, p.y) for i, p in enumerate(landmarks.landmark) if i % stride == 0]
+
+    return {
+        "pose": points(results.pose_landmarks),
+        "face": points(results.face_landmarks, face_stride),
+        "lh": points(results.left_hand_landmarks),
+        "rh": points(results.right_hand_landmarks),
+    }
+
+
 @dataclass(frozen=True)
 class GlossPrediction:
     gloss: str
@@ -72,6 +92,9 @@ class HolisticLSTMInfer:
         self._sequence: List[np.ndarray] = []
         self._predictions: List[int] = []
         self._last_gloss: Optional[str] = None
+        # Latest MediaPipe output and class probabilities, read by the preview.
+        self.last_results = None
+        self.last_probs: Optional[np.ndarray] = None
 
     def close(self) -> None:
         try:
@@ -98,6 +121,7 @@ class HolisticLSTMInfer:
         img.flags.writeable = False
         results = self._holistic.process(img)
         img.flags.writeable = True
+        self.last_results = results
 
         keypoints = extract_keypoints(results)
         self._sequence.append(keypoints)
@@ -106,7 +130,8 @@ class HolisticLSTMInfer:
         if len(self._sequence) < self.sequence_length:
             return None
 
-        idx, conf, _ = self._predict(self._sequence)
+        idx, conf, probs = self._predict(self._sequence)
+        self.last_probs = probs
         self._predictions.append(idx)
         self._predictions = self._predictions[-max(self.stable_n, 1) :]
 
