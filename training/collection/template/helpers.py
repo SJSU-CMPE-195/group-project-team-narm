@@ -1,18 +1,21 @@
-# Python side of the Colab ASL data collection notebook.
+# Python side of the Colab ASL data collection notebook (video only).
 #
 # make_notebooks.py inlines this file verbatim into the hidden "Setup" cell.
 # It expects these names to already exist (defined in the visible config cell):
 #   WORD, WORD_DISPLAY, PERSON, TAKES, FPS, CLIP_SECONDS, WIDTH, HEIGHT,
 #   JPEG_QUALITY, COUNTDOWN_SECONDS, AUTO_CONTINUE, MIRROR_PREVIEW,
-#   MIN_HAND_COVERAGE, USE_DRIVE, DRIVE_FOLDER, LOCAL_FOLDER
+#   USE_DRIVE, DRIVE_FOLDER, LOCAL_FOLDER
 #
 # What it does:
 #   - resolves the output folder (Google Drive if possible, local fallback)
-#   - runs MediaPipe Holistic on each uploaded take (same settings and the same
-#     1662-value keypoint layout as jetson-code/holistic_lstm_infer.py)
-#   - saves  <word>/<word>_<person>_<NNN>.mp4  +  .npy of shape (frames, 1662)
-#     and appends a row to manifest.csv
+#   - receives the frames of each take from the browser and checks the capture
+#     timing (stutter / repeated frames)
+#   - saves  <word>/<word>_<person>_<NNN>.mp4  and appends a row to manifest.csv
 #   - exposes the callbacks the browser UI (app.js) calls via google.colab.output
+#
+# No MediaPipe here on purpose: keypoints are extracted later, from these videos,
+# with whichever extractor the model is trained on. Only OpenCV and NumPy are
+# needed, and both are preinstalled in Colab.
 
 import base64
 import csv
@@ -21,28 +24,17 @@ import json
 import os
 import re
 import shutil
-import sys
 import tempfile
 import traceback
 import zipfile
 
 import cv2
 import numpy as np
-import mediapipe as mp
 
 try:
     from IPython.display import JSON as _JSON
 except Exception:  # pragma: no cover - only hit outside IPython
     _JSON = None
-
-# ---------------------------------------------------------------- config checks
-if not hasattr(mp, "solutions"):
-    raise RuntimeError(
-        "This mediapipe build has no legacy mp.solutions.holistic. Set Runtime > Change runtime type > "
-        "Runtime version to 2025.07 (Python 3.11), re-run the install cell "
-        "('!pip install -q mediapipe==0.10.18', the version the Jetson runs), then Runtime > Restart session."
-    )
-mp_holistic = mp.solutions.holistic
 
 
 def _slug(text):
@@ -57,8 +49,6 @@ if not PERSON_ID:
     raise ValueError("Set PERSON in the config cell (your first name, e.g. 'newton') and re-run.")
 
 NUM_FRAMES = int(round(FPS * CLIP_SECONDS))
-FACE_STRIDE = 3  # skeleton preview draws every 3rd face landmark (keeps the payload small)
-MEDIAPIPE_VERSION = getattr(mp, "__version__", "unknown")
 
 # ----------------------------------------------------------------- output folder
 ON_DRIVE = False
@@ -90,89 +80,13 @@ TMP_DIR = tempfile.mkdtemp(prefix="asl_collect_")
 
 MANIFEST_COLUMNS = [
     "word", "person", "take", "file_base", "clip_file", "fps", "num_frames", "width", "height",
-    "any_hand_cov", "lh_cov", "rh_cov", "pose_cov", "face_cov",
-    "camera_fps", "measured_fps", "max_gap_ms", "dup_frames",
-    "jpeg_quality", "mediapipe_version", "saved_utc",
+    "camera_fps", "measured_fps", "max_gap_ms", "dup_frames", "jpeg_quality", "saved_utc",
 ]
 
-# --------------------------------------------------------------------- keypoints
-def extract_keypoints(results):
-    """Identical layout to jetson-code/holistic_lstm_infer.py (1662 values)."""
-    pose = (
-        np.array([[r.x, r.y, r.z, r.visibility] for r in results.pose_landmarks.landmark]).flatten()
-        if results.pose_landmarks
-        else np.zeros(33 * 4)
-    )
-    face = (
-        np.array([[r.x, r.y, r.z] for r in results.face_landmarks.landmark]).flatten()
-        if results.face_landmarks
-        else np.zeros(468 * 3)
-    )
-    lh = (
-        np.array([[r.x, r.y, r.z] for r in results.left_hand_landmarks.landmark]).flatten()
-        if results.left_hand_landmarks
-        else np.zeros(21 * 3)
-    )
-    rh = (
-        np.array([[r.x, r.y, r.z] for r in results.right_hand_landmarks.landmark]).flatten()
-        if results.right_hand_landmarks
-        else np.zeros(21 * 3)
-    )
-    return np.concatenate([pose, face, lh, rh])
 
-
-def _flat(landmarks, stride=1, with_vis=False, scale=1000):
-    """Compact int list (x1000) for the browser skeleton overlay; [] when not detected."""
-    if landmarks is None:
-        return []
-    out = []
-    for i, lm in enumerate(landmarks.landmark):
-        if i % stride:
-            continue
-        out.append(int(round(lm.x * scale)))
-        out.append(int(round(lm.y * scale)))
-        if with_vis:
-            out.append(int(round(lm.visibility * scale)))
-    return out
-
-
-def process_clip(frames_bgr):
-    """Run Holistic over a clip.
-
-    Returns (keypoints[frames,1662] float32, overlay list for the browser, counts dict).
-    A fresh Holistic instance per take resets tracking state between takes.
-    """
-    kps, overlay = [], []
-    counts = {"pose": 0, "face": 0, "lh": 0, "rh": 0, "any_hand": 0}
-    with mp_holistic.Holistic(
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        model_complexity=0,
-    ) as holistic:
-        for bgr in frames_bgr:
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            res = holistic.process(rgb)
-            kps.append(extract_keypoints(res).astype(np.float32))
-            overlay.append(
-                {
-                    "p": _flat(res.pose_landmarks, with_vis=True),
-                    "f": _flat(res.face_landmarks, stride=FACE_STRIDE),
-                    "l": _flat(res.left_hand_landmarks),
-                    "r": _flat(res.right_hand_landmarks),
-                }
-            )
-            counts["pose"] += res.pose_landmarks is not None
-            counts["face"] += res.face_landmarks is not None
-            counts["lh"] += res.left_hand_landmarks is not None
-            counts["rh"] += res.right_hand_landmarks is not None
-            counts["any_hand"] += (
-                res.left_hand_landmarks is not None or res.right_hand_landmarks is not None
-            )
-    return np.stack(kps), overlay, counts
-
-
-def build_qa(counts, n_frames, meta):
+# -------------------------------------------------------------------- capture QA
+def build_qa(n_frames, meta):
+    """Capture-timing check only. Hands/pose are checked later, when keypoints are extracted."""
     n = max(int(n_frames), 1)
     ts = [float(t) for t in (meta.get("ts") or [])]
     if len(ts) >= 2 and ts[-1] > ts[0]:
@@ -182,15 +96,8 @@ def build_qa(counts, n_frames, meta):
         measured_fps, max_gap = 0.0, 0.0
     dups = int(meta.get("dup_frames", -1))
     stuttered = (measured_fps < 0.85 * FPS) or (dups > 0.10 * n) or (max_gap > 3.0 * 1000.0 / FPS)
-    any_cov = counts["any_hand"] / n
     return {
         "frames": int(n_frames),
-        "pose_cov": counts["pose"] / n,
-        "face_cov": counts["face"] / n,
-        "lh_cov": counts["lh"] / n,
-        "rh_cov": counts["rh"] / n,
-        "any_hand_cov": any_cov,
-        "low_hands": bool(any_cov < MIN_HAND_COVERAGE),
         "measured_fps": float(measured_fps),
         "max_gap_ms": float(max_gap),
         "stuttered": bool(stuttered),
@@ -225,7 +132,21 @@ def _write_clip(frames_bgr, base):
     return path
 
 
-_TAKE_RE = re.compile(r"^%s_%s_(\d+)\.npy$" % (re.escape(WORD_ID), re.escape(PERSON_ID)))
+def _verify_clip(path, expected_frames):
+    """Re-open the written clip so an unreadable or truncated file is never saved as 'good'."""
+    cap = cv2.VideoCapture(path)
+    try:
+        count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        ok, _ = cap.read()
+    finally:
+        cap.release()
+    if not ok or abs(count - expected_frames) > 1:
+        raise RuntimeError(
+            "the written clip looks wrong (%d frames, expected %d); take not saved" % (count, expected_frames)
+        )
+
+
+_TAKE_RE = re.compile(r"^%s_%s_(\d+)\.(?:mp4|avi)$" % (re.escape(WORD_ID), re.escape(PERSON_ID)))
 
 
 def existing_take_indices():
@@ -238,31 +159,35 @@ def existing_take_indices():
 
 
 def _append_manifest(row):
-    new_file = not os.path.exists(MANIFEST_PATH)
+    """Append one row. If manifest.csv already has a header (e.g. from an older notebook
+    version with extra columns), keep that header and fill what we have."""
+    fieldnames = MANIFEST_COLUMNS
+    new_file = not os.path.exists(MANIFEST_PATH) or os.path.getsize(MANIFEST_PATH) == 0
+    if not new_file:
+        with open(MANIFEST_PATH, newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), None)
+        if header:
+            fieldnames = header
     with open(MANIFEST_PATH, "a", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=MANIFEST_COLUMNS)
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore", restval="")
         if new_file:
             writer.writeheader()
         writer.writerow(row)
 
 
 def save_current_take():
-    """Persist the analyzed take. Order: npy, clip, manifest row (manifest = completed takes)."""
+    """Persist the checked take. Order: clip, then manifest row (manifest = completed takes)."""
     s = SESSION
-    if s["kp"] is None:
-        raise RuntimeError("no analyzed take to save")
+    if not s["bgr"] or s["qa"] is None:
+        raise RuntimeError("no checked take to save")
     indices = existing_take_indices()
     idx = (indices[-1] + 1) if indices else 1
     base = "%s_%s_%03d" % (WORD_ID, PERSON_ID, idx)
 
-    npy_tmp = os.path.join(TMP_DIR, base + ".npy")
-    np.save(npy_tmp, s["kp"])
     clip_tmp = _write_clip(s["bgr"], base)
-
-    shutil.copyfile(npy_tmp, os.path.join(WORD_DIR, base + ".npy"))
+    _verify_clip(clip_tmp, len(s["bgr"]))
     clip_name = os.path.basename(clip_tmp)
     shutil.copyfile(clip_tmp, os.path.join(WORD_DIR, clip_name))
-    os.remove(npy_tmp)
     os.remove(clip_tmp)
 
     qa, meta = s["qa"], s["meta"]
@@ -274,20 +199,14 @@ def save_current_take():
             "file_base": base,
             "clip_file": clip_name,
             "fps": FPS,
-            "num_frames": int(s["kp"].shape[0]),
+            "num_frames": len(s["bgr"]),
             "width": WIDTH,
             "height": HEIGHT,
-            "any_hand_cov": round(qa["any_hand_cov"], 4),
-            "lh_cov": round(qa["lh_cov"], 4),
-            "rh_cov": round(qa["rh_cov"], 4),
-            "pose_cov": round(qa["pose_cov"], 4),
-            "face_cov": round(qa["face_cov"], 4),
             "camera_fps": meta.get("camera_fps") or "",
             "measured_fps": round(qa["measured_fps"], 2),
             "max_gap_ms": round(qa["max_gap_ms"], 1),
             "dup_frames": meta.get("dup_frames", -1),
             "jpeg_quality": JPEG_QUALITY,
-            "mediapipe_version": MEDIAPIPE_VERSION,
             "saved_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
     )
@@ -295,11 +214,11 @@ def save_current_take():
 
 
 # ---------------------------------------------------------- browser callbacks
-SESSION = {"take_id": None, "bgr": [], "kp": None, "overlay": None, "qa": None, "meta": None}
+SESSION = {"take_id": None, "bgr": [], "qa": None, "meta": None}
 
 
 def _reset_session(take_id=None):
-    SESSION.update({"take_id": take_id, "bgr": [], "kp": None, "overlay": None, "qa": None, "meta": None})
+    SESSION.update({"take_id": take_id, "bgr": [], "qa": None, "meta": None})
 
 
 def _reply(obj):
@@ -331,9 +250,6 @@ def cb_init():
     return {
         "ok": True,
         "saved": len(existing_take_indices()),
-        "pose_conn": sorted([int(a), int(b)] for a, b in mp_holistic.POSE_CONNECTIONS),
-        "hand_conn": sorted([int(a), int(b)] for a, b in mp_holistic.HAND_CONNECTIONS),
-        "face_stride": FACE_STRIDE,
         "out_dir": WORD_DIR,
         "on_drive": ON_DRIVE,
     }
@@ -356,16 +272,15 @@ def cb_upload(take_id, start, *chunks):
 
 
 @_safe
-def cb_process(take_id, meta_json):
+def cb_check(take_id, meta_json):
     _check_take(take_id)
     frames = SESSION["bgr"]
     if len(frames) != NUM_FRAMES:
         raise RuntimeError("expected %d frames, got %d" % (NUM_FRAMES, len(frames)))
     meta = json.loads(meta_json) if meta_json else {}
-    kp, overlay, counts = process_clip(frames)
-    qa = build_qa(counts, len(frames), meta)
-    SESSION.update({"kp": kp, "overlay": overlay, "qa": qa, "meta": meta})
-    return {"ok": True, "qa": qa, "overlay": overlay}
+    qa = build_qa(len(frames), meta)
+    SESSION.update({"qa": qa, "meta": meta})
+    return {"ok": True, "qa": qa}
 
 
 @_safe
@@ -392,7 +307,7 @@ CALLBACKS = {
     "asl.init": cb_init,
     "asl.begin": cb_begin,
     "asl.upload": cb_upload,
-    "asl.process": cb_process,
+    "asl.check": cb_check,
     "asl.save": cb_save,
     "asl.discard": cb_discard,
     "asl.finish": cb_finish,
@@ -422,7 +337,6 @@ def ui_config():
         "target": int(TAKES),
         "autoContinue": bool(AUTO_CONTINUE),
         "mirrorPreview": bool(MIRROR_PREVIEW),
-        "minHandCoverage": float(MIN_HAND_COVERAGE),
         "flashMs": 1500,
         "stepMs": 1000,
     }
@@ -434,18 +348,17 @@ def summarize():
     rows = []
     if os.path.exists(MANIFEST_PATH):
         with open(MANIFEST_PATH, newline="", encoding="utf-8") as fh:
-            rows = [r for r in csv.DictReader(fh) if r["word"] == WORD_ID and r["person"] == PERSON_ID]
+            rows = [r for r in csv.DictReader(fh) if r.get("word") == WORD_ID and r.get("person") == PERSON_ID]
     print("Word: %s   Person: %s" % (WORD_ID, PERSON_ID))
     print("Saved takes: %d (target %d)" % (len(rows), TAKES))
     print("Folder: %s%s" % (WORD_DIR, "   [Google Drive]" if ON_DRIVE else "   [local Colab disk - download the zip!]"))
     if rows:
-        covs = [float(r["any_hand_cov"]) for r in rows]
-        print("Hand coverage (either hand): mean %.0f%%, min %.0f%%" % (100 * np.mean(covs), 100 * min(covs)))
-        weak = [r["file_base"] for r in rows if float(r["any_hand_cov"]) < MIN_HAND_COVERAGE]
-        if weak:
-            print("Low hand coverage, consider re-recording:", ", ".join(weak))
-        fps = [float(r["measured_fps"]) for r in rows]
-        print("Measured capture fps: mean %.1f, min %.1f" % (np.mean(fps), min(fps)))
+        fps = [float(r["measured_fps"]) for r in rows if r.get("measured_fps")]
+        if fps:
+            print("Measured capture fps: mean %.1f, min %.1f" % (np.mean(fps), min(fps)))
+            slow = [r["file_base"] for r in rows if r.get("measured_fps") and float(r["measured_fps"]) < 0.85 * FPS]
+            if slow:
+                print("Low capture fps, consider re-recording:", ", ".join(slow))
     return rows
 
 
@@ -468,7 +381,7 @@ def make_zip():
 
 
 print(
-    "[setup] word=%s person=%s | %d frames @ %d fps (%.1fs) at %dx%d | mediapipe %s"
-    % (WORD_ID, PERSON_ID, NUM_FRAMES, FPS, CLIP_SECONDS, WIDTH, HEIGHT, MEDIAPIPE_VERSION)
+    "[setup] word=%s person=%s | %d frames @ %d fps (%.1fs) at %dx%d"
+    % (WORD_ID, PERSON_ID, NUM_FRAMES, FPS, CLIP_SECONDS, WIDTH, HEIGHT)
 )
 print("[setup] output: %s%s | already saved: %d" % (WORD_DIR, " (Google Drive)" if ON_DRIVE else " (local)", len(existing_take_indices())))
