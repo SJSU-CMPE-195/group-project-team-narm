@@ -83,10 +83,9 @@ def _connections():
     try:
         import mediapipe as mp  # local import: the preview must still work without it
 
-        holistic = mp.solutions.holistic
         return (
-            sorted(tuple(int(i) for i in c) for c in holistic.POSE_CONNECTIONS),
-            sorted(tuple(int(i) for i in c) for c in holistic.HAND_CONNECTIONS),
+            sorted(tuple(int(i) for i in c) for c in mp.solutions.pose.POSE_CONNECTIONS),
+            sorted(tuple(int(i) for i in c) for c in mp.solutions.hands.HAND_CONNECTIONS),
         )
     except Exception:
         return [], []

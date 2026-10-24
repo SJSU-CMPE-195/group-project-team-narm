@@ -9,13 +9,37 @@ from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 
-from holistic_lstm_infer import HolisticLSTMInfer
+from holistic_lstm_infer import HolisticLSTMInfer, validate_model
 from tcp_ingest_server import PayloadFrame, TCPIngestServer
 
 
 def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     return int(value) if value else default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    return float(value) if value else default
+
+
+class FrameSampler:
+    """Keep every Nth decoded frame.
+
+    The model is trained on every 2nd frame of 30 fps video (15 fps). The glasses stream is about
+    30 fps, so FRAME_STRIDE=2 gives the model the same timing it was trained on. The stride is
+    applied to arriving frames (before the queue that drops frames when inference is slow), so it
+    does not depend on how fast inference runs. Set FRAME_STRIDE=1 to use every frame.
+    """
+
+    def __init__(self, stride: int) -> None:
+        self.stride = max(int(stride), 1)
+        self._count = 0
+
+    def keep(self) -> bool:
+        keep = self._count % self.stride == 0
+        self._count += 1
+        return keep
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -230,6 +254,11 @@ def main() -> None:
     import tensorflow as tf
 
     model = tf.keras.models.load_model(model_path, compile=False)
+    # Stop early with a clear message if the model was trained on a different feature set or word list.
+    validate_model(model, sequence_length, actions)
+    frame_stride = env_int("FRAME_STRIDE", 2)
+    min_hand_frac = env_float("MIN_HAND_FRAC", 0.6)
+    sampler = FrameSampler(frame_stride)
     infer = HolisticLSTMInfer(
         model=model,
         actions=actions,
@@ -239,6 +268,12 @@ def main() -> None:
         model_complexity=env_int("MODEL_COMPLEXITY", 0),
         infer_width=env_int("INFER_WIDTH", 640),
         repeat_reset=env_int("REPEAT_RESET", 15),
+        min_hand_frac=min_hand_frac,
+    )
+    print(
+        f"[main] model={model_path} actions={','.join(actions)} window={sequence_length} "
+        f"frame_stride={frame_stride} threshold={threshold} stable_n={stable_n} "
+        f"min_hand_frac={min_hand_frac}"
     )
     if payload_format == "jpeg":
         from decode_jpeg import JpegPayloadDecoder
@@ -317,6 +352,8 @@ def main() -> None:
                 if preview_http:
                     # Show every decoded frame; do not wait for inference.
                     latest.update_frame_rgb(decoded.rgb)
+                if not sampler.keep():
+                    continue  # skipped by FRAME_STRIDE; the model only sees every Nth frame
                 work = DecodedWorkFrame(
                     rgb=decoded.rgb,
                     received_ts=payload.received_ts,

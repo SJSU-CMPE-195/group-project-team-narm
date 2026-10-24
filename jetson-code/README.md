@@ -20,7 +20,7 @@ The ESP32 firmware determines which payload format is sent. The receiver must ma
 
 ## Pipeline overview
 
-ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, runs MediaPipe Holistic for keypoints, runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
+ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, keeps every `FRAME_STRIDE`-th one, runs MediaPipe **Pose + Hands** (no face mesh) for keypoints (`asl_features.py`, 258 values per frame), runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
 
 Until the ESP32 connects and sends frames, `main.py` blocks waiting on an internal queue—no `[gloss]` lines will appear.
 
@@ -28,7 +28,7 @@ Until the ESP32 connects and sends frames, `main.py` blocks waiting on an intern
 flowchart LR
   esp32[ESP32_tcp_sender] -->|len_u32be_payload| jetsonTcp[jetson_tcp_ingest]
   jetsonTcp --> decode[decode_h264_PyAV or jpeg_decode]
-  decode --> mp[MediaPipe_holistic]
+  decode --> mp[MediaPipe_pose_and_hands]
   mp --> lstm[TensorFlow_Keras_LSTM]
   lstm --> stdout[gloss_print_stdout]
 ```
@@ -194,14 +194,25 @@ python3 -c "import av; print('av', av.__version__)"
 
 ## Model file and `MODEL_PATH`
 
-**Supported default for this stack:** `jetson-code/models/action.h5` (loads with **TensorFlow 2.15.1 / Keras 2.15** as used above).
+**Supported for this stack:** an `.h5` trained with the no-face notebook, e.g. `jetson-code/models/action_3word_noface.h5` (saved and loaded with **TensorFlow 2.15.1 / Keras 2.15** as used above). The older `jetson-code/models/action.h5` is the legacy 1662-feature Holistic model and no longer runs with the current `main.py` (see below).
+
+**No-face models (current code).** `main.py` now extracts **258 features per frame** (MediaPipe Pose + Hands, no face) with `asl_features.py`. This file must be the same one the model was trained with: the 3-word Colab notebook writes it next to the model (`asl_features.py` and `model_meta.json` are downloaded together with `action_3word_noface.h5`). A model trained on the old 1662-feature Holistic layout (such as the original `models/action.h5`) is rejected at startup with an explanatory error; it needs the previous version of this code or retraining. `main.py` also checks that the model's window length (`SEQUENCE_LENGTH`) and number of outputs (`ACTIONS`) fit.
+
+Typical run for the 3-word model (the notebook prints the exact line):
+
+```bash
+MODEL_PATH=.../jetson-code/models/action_3word_noface.h5 ACTIONS=hello,thanks,iloveyou \
+FRAME_STRIDE=2 SEQUENCE_LENGTH=30 THRESHOLD=0.8 STABLE_N=10 python3 main.py
+```
+
+The first run may download MediaPipe's pose landmark model (`pose_landmark_lite.tflite`), so the Nano needs internet once (or the file already in the MediaPipe package folder).
 
 Other `.h5` files under `models/` are not validated for this README’s pinned environment; they may require different TensorFlow/Keras versions.
 
 Set the absolute path inside the container, e.g.:
 
 ```bash
-export MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5
+export MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5
 ```
 
 ## Wi-Fi / networking (ESP32)
@@ -312,7 +323,7 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 
 **Required:**
 
-- **`MODEL_PATH`** — path to the trained LSTM model (use `models/action.h5` for the documented stack)
+- **`MODEL_PATH`** — path to the trained LSTM model (a no-face `.h5` such as `models/action_3word_noface.h5`; 258 features per frame)
 
 **Optional:**
 
@@ -331,8 +342,10 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 - **`PREVIEW_FPS`** (default `30`) — max refresh rate of the preview page (decoding and inference are not limited by this)
 - **`PREVIEW_WIDTH`** (default `640`) — preview width in pixels; frames are shrunk before color conversion and JPEG encoding (`0` keeps the decoded size)
 - **`PREVIEW_JPEG_QUALITY`** (default `75`) — preview JPEG quality
-- **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose, hands, face) on the preview
-- **`MODEL_COMPLEXITY`** (default `0`) — MediaPipe Holistic complexity: `0` fastest, `1` MediaPipe's own default, `2` slowest. `0` is much faster on the Nano but its landmarks differ slightly from `1`; if accuracy drops, try `1`
+- **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose and hands) on the preview
+- **`MODEL_COMPLEXITY`** (default `0`) — MediaPipe Pose/Hands complexity: `0` fastest, `1`, `2` slowest. The training notebook uses `0`; the model must see the same landmarks it was trained on, so only change this if you retrain with the same value
+- **`FRAME_STRIDE`** (default `2`) — use every Nth decoded frame. The model is trained on every 2nd frame of 30 fps video (15 fps); the glasses stream is about 30 fps, so `2` matches training. Use `1` if the stream is already about 15 fps. Applied before the frame-dropping queue, so it does not depend on inference speed
+- **`MIN_HAND_FRAC`** (default `0.6`) — only run the LSTM when a hand was detected in at least this share of the last `SEQUENCE_LENGTH` frames (the training windows use the same rule). With no hands in view nothing is predicted, which also saves compute. `0` turns the check off
 - **`INFER_WIDTH`** (default `640`) — frames are shrunk to this width before MediaPipe (`0` = full size). Landmarks are normalized, so the model input does not change
 - **`REPEAT_RESET`** (default `15`) — after this many inferences without a confident new word, the last word is forgotten so the same word can be reported again (`0` = never)
 - **`SEQUENCE_LENGTH`** (default `30`)
@@ -348,7 +361,7 @@ From `jetson-code/`:
 cd /workspace/group-project-team-narm/jetson-code
 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
 PAYLOAD_FORMAT=h264 \
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5 \
 python3 main.py
 ```
 
@@ -363,7 +376,7 @@ Run with preview enabled:
 ```bash
 cd /workspace/group-project-team-narm/jetson-code
 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5 \
 PREVIEW_HTTP=1 PREVIEW_PORT=8000 \
 python3 main.py
 ```
@@ -411,7 +424,7 @@ echo 'export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python' >> ~/.bashrc
 source ~/.bashrc
 
 python3 -c "import tensorflow, mediapipe, cv2, av; print('deps ok')"
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 python3 main.py
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5 python3 main.py
 ```
 
 ## Expected output

@@ -1,91 +1,69 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import chain
 import threading
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-POSE_DIMS = 33 * 4
-FACE_DIMS = 468 * 3
-HAND_DIMS = 21 * 3
-KEYPOINT_DIMS = POSE_DIMS + FACE_DIMS + 2 * HAND_DIMS  # 1662
+import asl_features as F
+
+# Keypoints come from asl_features.py (MediaPipe Pose + Hands, no face mesh): 258 values per frame.
+# That file is shared, unchanged, with the training notebook so training and live inference match.
+FEATURE_DIM = F.FEATURE_DIM
 
 
-def _landmark_array(landmark_list, count: int, with_visibility: bool) -> np.ndarray:
-    """Flatten a MediaPipe landmark list; zeros if the part was not detected."""
-    width = 4 if with_visibility else 3
-    if landmark_list is None:
-        return np.zeros(count * width)
-    if with_visibility:
-        values = chain.from_iterable((p.x, p.y, p.z, p.visibility) for p in landmark_list.landmark)
-    else:
-        values = chain.from_iterable((p.x, p.y, p.z) for p in landmark_list.landmark)
-    return np.fromiter(values, dtype=np.float64, count=count * width)
+def extract_keypoints(pose_result, hands_result) -> np.ndarray:
+    """258-value feature vector from MediaPipe Pose and Hands results (see asl_features.py)."""
+    return F.extract_keypoints(pose_result, hands_result)
 
 
-def extract_keypoints(results) -> np.ndarray:
-    """
-    Match Action Detection Refined.ipynb keypoint layout (1662 dims):
-    - pose: 33 * (x,y,z,visibility) = 132
-    - face: 468 * (x,y,z) = 1404
-    - left hand: 21 * (x,y,z) = 63
-    - right hand: 21 * (x,y,z) = 63
-    """
-    return np.concatenate(
-        [
-            _landmark_array(results.pose_landmarks, 33, True),
-            _landmark_array(results.face_landmarks, 468, False),
-            _landmark_array(results.left_hand_landmarks, 21, False),
-            _landmark_array(results.right_hand_landmarks, 21, False),
-        ]
-    )
+def validate_model(model, sequence_length: int, actions: Sequence[str]) -> None:
+    """Fail at startup, with a readable message, if the model does not fit this pipeline."""
+    input_shape = getattr(model, "input_shape", None)
+    output_shape = getattr(model, "output_shape", None)
+    if isinstance(input_shape, list):  # multi-input models are not supported
+        raise RuntimeError("Expected a single-input model, got %r" % (input_shape,))
+    if input_shape is not None:
+        features = input_shape[-1]
+        if features != FEATURE_DIM:
+            hint = (
+                " That is the old Holistic model (pose + face + hands); it must be retrained with "
+                "the no-face notebook, or run with the old code."
+                if features == 1662
+                else ""
+            )
+            raise RuntimeError(
+                "Model expects %s features per frame but this pipeline produces %d "
+                "(%s).%s" % (features, FEATURE_DIM, F.FEATURE_VERSION, hint)
+            )
+        steps = input_shape[1] if len(input_shape) >= 3 else None
+        if steps is not None and int(steps) != int(sequence_length):
+            raise RuntimeError(
+                "Model expects %s frames per input but SEQUENCE_LENGTH is %d." % (steps, sequence_length)
+            )
+    if output_shape is not None and int(output_shape[-1]) != len(actions):
+        raise RuntimeError(
+            "Model has %s outputs but ACTIONS lists %d words (%s). ACTIONS must be in the "
+            "same order as in training." % (output_shape[-1], len(actions), ",".join(actions))
+        )
 
 
-def landmarks_from_results(results, face_stride: int = 3) -> dict:
-    """Normalized (x, y) points for drawing a skeleton preview.
+def landmarks_from_keypoints(keypoints: np.ndarray) -> dict:
+    """Normalized (x, y) points for drawing a skeleton preview, built from the model's feature vector
+    (so the MediaPipe protobuf objects are not walked a second time).
 
+    Keys: pose, lh (hand slot A), rh (hand slot B). A part that was not detected is [].
     Only used when the preview is on; it does not affect the model input.
-    Keys: pose, face (every `face_stride`-th point), lh, rh. Missing parts are [].
     """
-
-    def points(landmarks, stride: int = 1):
-        if landmarks is None:
-            return []
-        return [(p.x, p.y) for i, p in enumerate(landmarks.landmark) if i % stride == 0]
-
+    pose = keypoints[F.POSE_SLICE]
+    hand_a = keypoints[F.HAND_A_SLICE]
+    hand_b = keypoints[F.HAND_B_SLICE]
     return {
-        "pose": points(results.pose_landmarks),
-        "face": points(results.face_landmarks, face_stride),
-        "lh": points(results.left_hand_landmarks),
-        "rh": points(results.right_hand_landmarks),
-    }
-
-
-def landmarks_from_keypoints(
-    keypoints: np.ndarray,
-    present: Tuple[bool, bool, bool, bool],
-    face_stride: int = 3,
-) -> dict:
-    """Same output as `landmarks_from_results`, built from the model's keypoint
-    vector so the (slow) MediaPipe protobuf objects are not walked a second time.
-
-    `present` is (pose, face, left_hand, right_hand) detection flags.
-    """
-    has_pose, has_face, has_lh, has_rh = present
-    pose_end = POSE_DIMS
-    face_end = pose_end + FACE_DIMS
-    lh_end = face_end + HAND_DIMS
-    rh_end = lh_end + HAND_DIMS
-    return {
-        "pose": keypoints[:pose_end].reshape(33, 4)[:, :2].tolist() if has_pose else [],
-        "face": (
-            keypoints[pose_end:face_end].reshape(468, 3)[::face_stride, :2].tolist() if has_face else []
-        ),
-        "lh": keypoints[face_end:lh_end].reshape(21, 3)[:, :2].tolist() if has_lh else [],
-        "rh": keypoints[lh_end:rh_end].reshape(21, 3)[:, :2].tolist() if has_rh else [],
+        "pose": pose.reshape(F.POSE_COUNT, 4)[:, :2].tolist() if np.any(pose != 0) else [],
+        "lh": hand_a.reshape(F.HAND_COUNT, 3)[:, :2].tolist() if np.any(hand_a != 0) else [],
+        "rh": hand_b.reshape(F.HAND_COUNT, 3)[:, :2].tolist() if np.any(hand_b != 0) else [],
     }
 
 
@@ -121,6 +99,12 @@ class StageTimer:
 
 
 class HolisticLSTMInfer:
+    """Keypoints (MediaPipe Pose + Hands) -> LSTM -> stable gloss.
+
+    The class keeps its old name so main.py and the tests keep working; it no longer runs
+    MediaPipe Holistic or reads face landmarks.
+    """
+
     def __init__(
         self,
         model,
@@ -131,16 +115,20 @@ class HolisticLSTMInfer:
         stable_n: int = 10,
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
-        model_complexity: int = 1,
+        model_complexity: int = 0,
         infer_width: int = 0,
         repeat_reset: int = 0,
+        min_hand_frac: float = 0.0,
     ) -> None:
         """
-        model_complexity: MediaPipe Holistic complexity (0 fastest, 1 default, 2 slowest).
+        model_complexity: MediaPipe Pose/Hands complexity. The training notebook uses 0, so keep
+            0 unless the model was retrained with another value.
         infer_width: shrink frames to this width before MediaPipe (0 = keep full size).
             Landmarks are normalized, so the model input is unchanged.
         repeat_reset: after this many non-confident inferences, forget the last gloss so
             the same word can be reported again (0 = never, the old behaviour).
+        min_hand_frac: only predict when a hand was detected in at least this share of the
+            window's frames (the training notebook only trains on such windows). 0 = off.
         """
         self.model = model
         self.actions = list(actions)
@@ -149,8 +137,7 @@ class HolisticLSTMInfer:
         self.stable_n = int(stable_n)
         self.infer_width = int(infer_width)
         self.repeat_reset = int(repeat_reset)
-
-        import mediapipe as mp  # local import for easier install/debug
+        self.min_hand_frac = float(min_hand_frac)
 
         self._cv2 = None
         if self.infer_width > 0:
@@ -158,36 +145,35 @@ class HolisticLSTMInfer:
 
             self._cv2 = cv2
 
-        self._mp_holistic = mp.solutions.holistic
-        self._holistic = self._mp_holistic.Holistic(
+        self._detector = F.Detector(
+            model_complexity=int(model_complexity),
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
-            model_complexity=int(model_complexity),
         )
 
         self._sequence: List[np.ndarray] = []
+        self._hands: List[bool] = []
         self._predictions: List[int] = []
         self._last_gloss: Optional[str] = None
         self._idle = 0
         # Latest class probabilities and skeleton, read by the preview.
         self.last_probs: Optional[np.ndarray] = None
         self.last_keypoints: Optional[np.ndarray] = None
-        self.last_present: Tuple[bool, bool, bool, bool] = (False, False, False, False)
         self.timer = StageTimer()
 
     def close(self) -> None:
         try:
-            self._holistic.close()
+            self._detector.close()
         except Exception:
             pass
 
-    def preview_landmarks(self, face_stride: int = 3) -> Optional[dict]:
+    def preview_landmarks(self) -> Optional[dict]:
         if self.last_keypoints is None:
             return None
-        return landmarks_from_keypoints(self.last_keypoints, self.last_present, face_stride)
+        return landmarks_from_keypoints(self.last_keypoints)
 
     def _predict(self, sequence: List[np.ndarray]) -> Tuple[int, float, np.ndarray]:
-        x = np.expand_dims(np.array(sequence, dtype=np.float32), axis=0)  # (1, T, 1662)
+        x = np.expand_dims(np.array(sequence, dtype=np.float32), axis=0)  # (1, T, FEATURE_DIM)
         # Direct eager invocation avoids Keras predict()'s per-call data adapter.
         output = self.model(x, training=False)
         res = np.asarray(output)[0]
@@ -201,6 +187,11 @@ class HolisticLSTMInfer:
             self._idle += 1
             if self._idle >= self.repeat_reset:
                 self._last_gloss = None
+
+    def _hands_ok(self) -> bool:
+        if self.min_hand_frac <= 0:
+            return True
+        return (sum(self._hands) / max(len(self._hands), 1)) >= self.min_hand_frac
 
     def push_frame(self, rgb_frame: np.ndarray) -> Optional[GlossPrediction]:
         """
@@ -216,28 +207,27 @@ class HolisticLSTMInfer:
             )
         t1 = time.perf_counter()
 
-        # MediaPipe expects RGB.
-        img.flags.writeable = False
-        results = self._holistic.process(img)
-        img.flags.writeable = True
+        # MediaPipe expects RGB. The frame must not be mirrored (training used unmirrored frames).
+        keypoints = self._detector.process(img)
         t2 = time.perf_counter()
 
-        keypoints = extract_keypoints(results)
         self.last_keypoints = keypoints
-        self.last_present = (
-            results.pose_landmarks is not None,
-            results.face_landmarks is not None,
-            results.left_hand_landmarks is not None,
-            results.right_hand_landmarks is not None,
-        )
         self._sequence.append(keypoints)
         self._sequence = self._sequence[-self.sequence_length :]
-        t3 = time.perf_counter()
+        self._hands.append(F.hands_present(keypoints))
+        self._hands = self._hands[-self.sequence_length :]
         self.timer.add("resize", t1 - t0)
         self.timer.add("mediapipe", t2 - t1)
-        self.timer.add("keypoints", t3 - t2)
 
         if len(self._sequence) < self.sequence_length:
+            return None
+
+        # Same rule as the training windows: not enough hand frames -> no prediction, and the
+        # agreement streak starts over (so a word needs stable_n fresh windows with hands).
+        if not self._hands_ok():
+            self._predictions = []
+            self.last_probs = None
+            self._note_idle()
             return None
 
         t4 = time.perf_counter()
