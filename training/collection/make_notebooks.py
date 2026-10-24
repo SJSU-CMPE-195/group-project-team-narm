@@ -90,7 +90,7 @@ saved as a video clip plus a row in `manifest.csv`. Keypoints are extracted late
 1. In **1. Config**, type your first name in `PERSON` (lowercase) and press play.
 2. Press play on **Setup** (it mounts Google Drive so takes survive a disconnect - click Allow).
 3. Press play on **2. Record takes**. Allow camera access when Chrome asks.
-4. For each take the word flashes, a 5-4-3-2-1 countdown runs, then it records
+4. For each take the word flashes, a 3-2-1 countdown runs, then it records
    {frames} frames ({seconds:.1f} s) with a frame counter in the corner. Sign **{display}** once during the take.
 5. Replay the take (pause, slow-mo, scrub), then click **Good - save** or **Bad - retry**.
 6. It stops after **{takes}** good takes. Re-running the cell resumes where you left off.
@@ -125,7 +125,7 @@ FPS = 30                   # capture rate; 30 lets you derive 15 or 10 fps later
 CLIP_SECONDS = 3.0         # 3.0 s -> 90 frames
 WIDTH, HEIGHT = 640, 360   # 16:9, matches the glasses stream aspect ratio
 JPEG_QUALITY = 0.85
-COUNTDOWN_SECONDS = 5
+COUNTDOWN_SECONDS = 3
 AUTO_CONTINUE = True       # False = click "Start next take" between takes
 MIRROR_PREVIEW = False     # cosmetic: mirrors only the live preview, never the saved frames
 

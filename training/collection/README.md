@@ -29,7 +29,7 @@ python make_notebooks.py --all              # all words in WORDS
    (or open it from GitHub). The default runtime is fine; there is nothing to install.
 2. In **1. Config** type your first name into `PERSON` (lowercase). Leave everything else alone.
 3. Run **Setup** (it mounts Google Drive, click Allow), then **2. Record takes**, and allow the camera.
-4. Per take: the word flashes, 5-4-3-2-1 countdown, then recording with a `REC n/90` counter in the corner.
+4. Per take: the word flashes, 3-2-1 countdown, then recording with a `REC n/90` counter in the corner.
 5. Review: replay with Pause, 1x / 0.5x / 0.25x and a scrub slider. Check that your head and both hands
    stayed in frame and that you signed once. It also warns if the capture stuttered (low fps or many
    repeated frames).

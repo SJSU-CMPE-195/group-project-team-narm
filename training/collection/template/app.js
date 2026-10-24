@@ -6,7 +6,7 @@
 // helpers.py:ui_config(). (The placeholder must appear exactly once in this file.)
 //
 // Flow per take:
-//   flash word -> countdown 5..1 -> record N frames (corner counter) ->
+//   flash word -> countdown 3..1 -> record N frames (corner counter) ->
 //   upload frames to Python -> capture-timing check -> review/replay -> Good (save) / Bad (retry)
 //
 // Frames are always saved UNMIRRORED. MIRROR_PREVIEW only changes the live preview.
