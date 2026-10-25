@@ -26,10 +26,10 @@ def env_float(name: str, default: float) -> float:
 class FrameSampler:
     """Keep every Nth decoded frame.
 
-    The model is trained on every 2nd frame of 30 fps video (15 fps). The glasses stream is about
-    30 fps, so FRAME_STRIDE=2 gives the model the same timing it was trained on. The stride is
-    applied to arriving frames (before the queue that drops frames when inference is slow), so it
-    does not depend on how fast inference runs. Set FRAME_STRIDE=1 to use every frame.
+    The model is trained on every 2nd frame of 30 fps video (15 fps). The glasses stream defaults
+    to 15 fps, so FRAME_STRIDE=1 keeps every frame to match that timing. Use FRAME_STRIDE=2 for
+    30 fps firmware. The stride is applied to arriving frames (before the queue that drops frames
+    when inference is slow), so it does not depend on how fast inference runs.
     """
 
     def __init__(self, stride: int) -> None:
@@ -256,7 +256,7 @@ def main() -> None:
     model = tf.keras.models.load_model(model_path, compile=False)
     # Stop early with a clear message if the model was trained on a different feature set or word list.
     validate_model(model, sequence_length, actions)
-    frame_stride = env_int("FRAME_STRIDE", 2)
+    frame_stride = env_int("FRAME_STRIDE", 1)
     min_hand_frac = env_float("MIN_HAND_FRAC", 0.6)
     sampler = FrameSampler(frame_stride)
     infer = HolisticLSTMInfer(

@@ -22,6 +22,8 @@ The ESP32 firmware determines which payload format is sent. The receiver must ma
 
 ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, keeps every `FRAME_STRIDE`-th one, runs MediaPipe **Pose + Hands** (no face mesh) for keypoints (`asl_features.py`, 258 values per frame), runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
 
+The current ESP32 firmware targets 15 FPS. The receiver defaults to `FRAME_STRIDE=1` to keep every decoded frame and match the model's 15 FPS training rate. For 30 FPS firmware, use `FRAME_STRIDE=2`.
+
 Until the ESP32 connects and sends frames, `main.py` blocks waiting on an internal queue—no `[gloss]` lines will appear.
 
 ```mermaid
@@ -202,7 +204,7 @@ Typical run for the 3-word model (the notebook prints the exact line):
 
 ```bash
 MODEL_PATH=.../jetson-code/models/action_3word_noface.h5 ACTIONS=hello,thanks,iloveyou \
-FRAME_STRIDE=2 SEQUENCE_LENGTH=30 THRESHOLD=0.8 STABLE_N=10 python3 main.py
+FRAME_STRIDE=1 SEQUENCE_LENGTH=30 THRESHOLD=0.8 STABLE_N=10 python3 main.py
 ```
 
 The first run may download MediaPipe's pose landmark model (`pose_landmark_lite.tflite`), so the Nano needs internet once (or the file already in the MediaPipe package folder).
@@ -344,7 +346,7 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 - **`PREVIEW_JPEG_QUALITY`** (default `75`) — preview JPEG quality
 - **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose and hands) on the preview
 - **`MODEL_COMPLEXITY`** (default `0`) — MediaPipe Pose/Hands complexity: `0` fastest, `1`, `2` slowest. The training notebook uses `0`; the model must see the same landmarks it was trained on, so only change this if you retrain with the same value
-- **`FRAME_STRIDE`** (default `2`) — use every Nth decoded frame. The model is trained on every 2nd frame of 30 fps video (15 fps); the glasses stream is about 30 fps, so `2` matches training. Use `1` if the stream is already about 15 fps. Applied before the frame-dropping queue, so it does not depend on inference speed
+- **`FRAME_STRIDE`** (default `1`) — use every Nth decoded frame. The model is trained on every 2nd frame of 30 fps video (15 fps); the current glasses firmware targets 15 fps, so `1` keeps every frame to match training. Use `2` for 30 fps firmware. Applied before the frame-dropping queue, so it does not depend on inference speed
 - **`MIN_HAND_FRAC`** (default `0.6`) — only run the LSTM when a hand was detected in at least this share of the last `SEQUENCE_LENGTH` frames (the training windows use the same rule). With no hands in view nothing is predicted, which also saves compute. `0` turns the check off
 - **`INFER_WIDTH`** (default `640`) — frames are shrunk to this width before MediaPipe (`0` = full size). Landmarks are normalized, so the model input does not change
 - **`REPEAT_RESET`** (default `15`) — after this many inferences without a confident new word, the last word is forgotten so the same word can be reported again (`0` = never)
