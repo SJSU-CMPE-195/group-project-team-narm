@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import json
+import os
 import threading
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -17,6 +20,83 @@ FEATURE_DIM = F.FEATURE_DIM
 def extract_keypoints(pose_result, hands_result) -> np.ndarray:
     """258-value feature vector from MediaPipe Pose and Hands results (see asl_features.py)."""
     return F.extract_keypoints(pose_result, hands_result)
+
+
+def load_model_meta(model_path: str) -> dict:
+    """model_meta.json from the model's folder ({} if there is none).
+
+    The training notebook writes it next to the .h5 with the word list, window, frame stride, frame
+    size and decision rules the model was trained and tested with. Raises if it describes a different
+    feature layout than this asl_features.py.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(model_path)), "model_meta.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    version, dim = meta.get("feature_version"), meta.get("feature_dim")
+    if version not in (None, F.FEATURE_VERSION) or dim not in (None, F.FEATURE_DIM):
+        raise RuntimeError(
+            "%s says the model uses features %r (%s values) but asl_features.py makes %r (%d values). "
+            "Copy the asl_features.py that was exported with the model into jetson-code/."
+            % (path, version, dim, F.FEATURE_VERSION, F.FEATURE_DIM)
+        )
+    meta["_path"] = path
+    return meta
+
+
+def prepare_frame(rgb: np.ndarray, size: Tuple[int, int]) -> np.ndarray:
+    """Center-crop to the training aspect ratio (never stretch), then resize to `size` (w, h).
+
+    Same geometry as the training notebook and live_local.py, so pose and hand coordinates mean the
+    same thing as in the training clips.
+    """
+    import cv2
+
+    fw, fh = int(size[0]), int(size[1])
+    h, w = rgb.shape[:2]
+    target = fw / fh
+    if abs(w / h - target) > 0.01:
+        if w / h > target:
+            new_w = int(round(h * target))
+            x0 = (w - new_w) // 2
+            rgb = rgb[:, x0:x0 + new_w]
+        else:
+            new_h = int(round(w / target))
+            y0 = (h - new_h) // 2
+            rgb = rgb[y0:y0 + new_h]
+    if rgb.shape[1] != fw or rgb.shape[0] != fh:
+        rgb = cv2.resize(rgb, (fw, fh), interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(rgb)
+
+
+class ParallelDetector:
+    """asl_features.Detector with Pose and Hands running at the same time (MediaPipe releases the GIL).
+
+    Same solvers and settings, so the feature vector is identical to Detector.process; only the
+    wall time drops from pose + hands to max(pose, hands).
+    """
+
+    def __init__(self, detector) -> None:
+        self.det = detector
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mp-hands")
+
+    def process(self, rgb: np.ndarray) -> np.ndarray:
+        det = self.det
+        rgb.flags.writeable = False
+        hands_future = self._pool.submit(det._hands.process, rgb)
+        try:
+            pose_result = det._pose.process(rgb)
+        finally:
+            hands_result = hands_future.result()
+            rgb.flags.writeable = True
+        return F.extract_keypoints(pose_result, hands_result)
+
+    def close(self) -> None:
+        try:
+            self.det.close()
+        finally:
+            self._pool.shutdown(wait=False)
 
 
 def validate_model(model, sequence_length: int, actions: Sequence[str]) -> None:
@@ -119,23 +199,32 @@ class HolisticLSTMInfer:
         infer_width: int = 0,
         repeat_reset: int = 0,
         min_hand_frac: float = 0.0,
+        frame_size: Optional[Tuple[int, int]] = None,
+        parallel: bool = True,
+        predict_fn: Optional[Callable[[np.ndarray], object]] = None,
     ) -> None:
         """
         model_complexity: MediaPipe Pose/Hands complexity. The training notebook uses 0, so keep
             0 unless the model was retrained with another value.
-        infer_width: shrink frames to this width before MediaPipe (0 = keep full size).
-            Landmarks are normalized, so the model input is unchanged.
+        infer_width: shrink frames to this width before MediaPipe (0 = keep full size). Only used
+            when frame_size is not given.
         repeat_reset: after this many non-confident inferences, forget the last gloss so
             the same word can be reported again (0 = never, the old behaviour).
         min_hand_frac: only predict when a hand was detected in at least this share of the
             window's frames (the training notebook only trains on such windows). 0 = off.
+        frame_size: (w, h) the model was trained on; frames are center-cropped to that aspect ratio
+            and resized to it before MediaPipe, exactly like the training clips.
+        parallel: run MediaPipe Pose and Hands in two threads (same result, less wall time).
+        predict_fn: optional fast callable x -> probabilities (e.g. a tf.function); default model(x).
         """
         self.model = model
+        self.predict_fn = predict_fn
         self.actions = list(actions)
         self.sequence_length = int(sequence_length)
         self.threshold = float(threshold)
         self.stable_n = int(stable_n)
         self.infer_width = int(infer_width)
+        self.frame_size = tuple(int(v) for v in frame_size) if frame_size else None
         self.repeat_reset = int(repeat_reset)
         self.min_hand_frac = float(min_hand_frac)
 
@@ -150,6 +239,8 @@ class HolisticLSTMInfer:
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
+        if parallel:
+            self._detector = ParallelDetector(self._detector)
 
         self._sequence: List[np.ndarray] = []
         self._hands: List[bool] = []
@@ -174,8 +265,11 @@ class HolisticLSTMInfer:
 
     def _predict(self, sequence: List[np.ndarray]) -> Tuple[int, float, np.ndarray]:
         x = np.expand_dims(np.array(sequence, dtype=np.float32), axis=0)  # (1, T, FEATURE_DIM)
-        # Direct eager invocation avoids Keras predict()'s per-call data adapter.
-        output = self.model(x, training=False)
+        if getattr(self, "predict_fn", None) is not None:
+            output = self.predict_fn(x)
+        else:
+            # Direct eager invocation avoids Keras predict()'s per-call data adapter.
+            output = self.model(x, training=False)
         res = np.asarray(output)[0]
         idx = int(np.argmax(res))
         conf = float(res[idx])
@@ -200,7 +294,9 @@ class HolisticLSTMInfer:
         """
         t0 = time.perf_counter()
         img = rgb_frame
-        if self._cv2 is not None and img.shape[1] > self.infer_width:
+        if getattr(self, "frame_size", None):
+            img = prepare_frame(img, self.frame_size)
+        elif self._cv2 is not None and img.shape[1] > self.infer_width:
             height = max(int(round(img.shape[0] * self.infer_width / img.shape[1])), 1)
             img = self._cv2.resize(
                 img, (self.infer_width, height), interpolation=self._cv2.INTER_AREA
