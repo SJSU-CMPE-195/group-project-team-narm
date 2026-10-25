@@ -1,0 +1,36 @@
+{
+  "model_file": "action_3word_noface.h5",
+  "actions": [
+    "hello",
+    "thanks",
+    "iloveyou"
+  ],
+  "window": 20,
+  "frame_stride": 2,
+  "capture_fps": 30,
+  "effective_fps": 15.0,
+  "feature_dim": 258,
+  "feature_version": "pose-hands-v1",
+  "min_hand_frac": 0.6,
+  "stable_n": 6,
+  "threshold": 0.75,
+  "frame_size": [
+    640,
+    360
+  ],
+  "versions": {
+    "tensorflow": "2.15.1",
+    "keras": "2.15.0",
+    "mediapipe": "0.10.18",
+    "numpy": "1.26.4"
+  },
+  "clips_used": {
+    "hello": 30,
+    "thanks": 30,
+    "iloveyou": 30
+  },
+  "model_complexity": 0,
+  "epochs_run": 38,
+  "validation_accuracy": 0.9830508474576272,
+  "trained_utc": "2026-10-24T23:46:16Z"
+}

@@ -41,7 +41,11 @@ WORDS = [
 DISPLAY_OVERRIDES = {
     "i_me": "I / ME",
     "dont_understand": "DON'T UNDERSTAND",
+    "iloveyou": "I LOVE YOU",
 }
+
+# Where the notebooks save takes in Google Drive unless --drive-folder says otherwise.
+DEFAULT_DRIVE_FOLDER = "ASL_collection"
 
 
 def display_name(word):
@@ -130,7 +134,7 @@ AUTO_CONTINUE = True       # False = click "Start next take" between takes
 MIRROR_PREVIEW = False     # cosmetic: mirrors only the live preview, never the saved frames
 
 USE_DRIVE = True           # save to Google Drive (recommended; survives disconnects)
-DRIVE_FOLDER = "ASL_collection"
+DRIVE_FOLDER = "{drive_folder}"
 LOCAL_FOLDER = "/content/asl_collection_output"   # used if Drive is off/unavailable
 '''
 
@@ -158,7 +162,7 @@ if DOWNLOAD_ZIP:
 """
 
 
-def build_notebook(word):
+def build_notebook(word, drive_folder=DEFAULT_DRIVE_FOLDER):
     if not re.fullmatch(r"[a-z0-9_]+", word):
         raise ValueError("word must be lowercase letters/digits/underscores: %r" % word)
     display = display_name(word)
@@ -170,7 +174,7 @@ def build_notebook(word):
     frames = 90
     cells = [
         _md(word, 0, INTRO_MD.format(display=display, frames=frames, seconds=3.0, takes=30)),
-        _code(word, 1, CONFIG_CODE.format(word=word, display=display)),
+        _code(word, 1, CONFIG_CODE.format(word=word, display=display, drive_folder=drive_folder)),
         _code(word, 2, '#@title Setup - press play (do not edit) { display-mode: "form" }\n' + helpers, hidden=True),
         _code(word, 3, RUN_PREFIX + app_js.strip("\n") + RUN_SUFFIX, hidden=True),
         _code(word, 4, SUMMARY_CODE, hidden=True),
@@ -187,11 +191,11 @@ def build_notebook(word):
     }
 
 
-def write_notebook(word, out_dir):
+def write_notebook(word, out_dir, drive_folder=DEFAULT_DRIVE_FOLDER):
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "collect_%s.ipynb" % word)
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(build_notebook(word), fh, indent=1, ensure_ascii=False)
+        json.dump(build_notebook(word, drive_folder), fh, indent=1, ensure_ascii=False)
         fh.write("\n")
     return path
 
@@ -203,6 +207,11 @@ def main(argv=None):
     group.add_argument("--words", help="comma-separated words")
     group.add_argument("--all", action="store_true", help="generate every word in WORDS")
     parser.add_argument("--out", default=DEFAULT_OUT, help="output folder (default: %(default)s)")
+    parser.add_argument(
+        "--drive-folder",
+        default=DEFAULT_DRIVE_FOLDER,
+        help="Google Drive folder the takes are saved under (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.all:
@@ -213,7 +222,7 @@ def main(argv=None):
         words = [args.word.strip()]
 
     for word in words:
-        print("wrote", write_notebook(word, args.out))
+        print("wrote", write_notebook(word, args.out, args.drive_folder))
     print("%d notebook(s) -> %s" % (len(words), args.out))
     return 0
 

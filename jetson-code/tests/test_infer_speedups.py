@@ -160,6 +160,8 @@ class PushFrameTests(unittest.TestCase):
         obj.infer_width = kwargs.get("infer_width", 0)
         obj.repeat_reset = kwargs.get("repeat_reset", 0)
         obj.min_hand_frac = kwargs.get("min_hand_frac", 0.0)
+        obj.frame_size = kwargs.get("frame_size")
+        obj.predict_fn = kwargs.get("predict_fn")
         obj._cv2 = None
         if obj.infer_width:
             import cv2
@@ -244,6 +246,147 @@ class PushFrameTests(unittest.TestCase):
             infer.push_frame(np.zeros((90, 160, 3), np.uint8))
         # windows (3 frames) after frames 3..7 -> hand shares 2/3, 2/3, 1/3, 1/3, 0 -> only the first two predict
         self.assertEqual(len(calls), 2)
+
+    def test_frame_size_crops_to_training_geometry(self):
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            self.skipTest("cv2 not installed")
+        infer = self.build(frame_size=(640, 360), infer_width=0)
+        infer.push_frame(np.zeros((480, 640, 3), np.uint8))   # 4:3 -> cropped, not stretched
+        infer.push_frame(np.zeros((1080, 1920, 3), np.uint8))  # 16:9 -> resized only
+        self.assertEqual(infer._detector.seen_shapes, [(360, 640, 3), (360, 640, 3)])
+
+    def test_predict_fn_is_used_instead_of_model(self):
+        calls = []
+
+        def fast(x):
+            calls.append(x.shape)
+            return np.array([[0.1, 0.8, 0.1]], np.float32)
+
+        infer = self.build(predict_fn=fast)
+        infer.model = lambda x, training=False: self.fail("eager model should not be called")
+        self.assertEqual(self.feed(infer, 4), ["thanks"])
+        self.assertEqual(calls[0], (1, 3, F.FEATURE_DIM))
+
+
+class PrepareFrameTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            self.skipTest("cv2 not installed")
+
+    def test_wide_frame_is_center_cropped_left_right(self):
+        frame = np.zeros((360, 800, 3), np.uint8)
+        frame[:, 80:720] = 200          # the centered 640 columns
+        out = hli.prepare_frame(frame, (640, 360))
+        self.assertEqual(out.shape, (360, 640, 3))
+        self.assertTrue(np.all(out == 200))
+
+    def test_tall_frame_is_center_cropped_top_bottom(self):
+        frame = np.zeros((480, 640, 3), np.uint8)
+        frame[60:420] = 200             # the centered 360 rows
+        out = hli.prepare_frame(frame, (640, 360))
+        self.assertEqual(out.shape, (360, 640, 3))
+        self.assertTrue(np.all(out == 200))
+
+    def test_same_aspect_is_only_resized(self):
+        out = hli.prepare_frame(np.full((1080, 1920, 3), 7, np.uint8), (640, 360))
+        self.assertEqual(out.shape, (360, 640, 3))
+        self.assertTrue(np.all(out == 7))
+
+
+class FakeSolver:
+    def __init__(self, result, delay=0.0):
+        self.result, self.delay, self.writeable_seen = result, delay, []
+
+    def process(self, img):
+        import time
+
+        self.writeable_seen.append(img.flags.writeable)
+        time.sleep(self.delay)
+        return self.result
+
+
+class ParallelDetectorTests(unittest.TestCase):
+    def test_same_features_as_serial_and_frame_restored(self):
+        det = types.SimpleNamespace(
+            _pose=FakeSolver(pose_result(), delay=0.05),
+            _hands=FakeSolver(hands_result(("Left", LM(21, 3))), delay=0.05),
+            close=lambda: None,
+        )
+        par = hli.ParallelDetector(det)
+        frame = np.zeros((360, 640, 3), np.uint8)
+        import time
+
+        t0 = time.perf_counter()
+        kp = par.process(frame)
+        elapsed = time.perf_counter() - t0
+        par.close()
+        serial = hli.extract_keypoints(det._pose.result, det._hands.result)
+        np.testing.assert_array_equal(kp, serial)
+        self.assertTrue(frame.flags.writeable)
+        self.assertEqual(det._pose.writeable_seen + det._hands.writeable_seen, [False, False])
+        self.assertLess(elapsed, 0.095)  # both 50 ms solvers ran at the same time
+
+
+class ModelMetaTests(unittest.TestCase):
+    def write(self, folder, meta):
+        import json
+        import os
+
+        model = os.path.join(folder, "m.h5")
+        open(model, "wb").close()
+        if meta is not None:
+            with open(os.path.join(folder, "model_meta.json"), "w", encoding="utf-8") as fh:
+                json.dump(meta, fh)
+        return model
+
+    def test_missing_meta_gives_empty_dict(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(hli.load_model_meta(self.write(d, None)), {})
+
+    def test_other_feature_layout_is_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            model = self.write(d, {"feature_version": "holistic", "feature_dim": 1662})
+            with self.assertRaises(RuntimeError):
+                hli.load_model_meta(model)
+
+    def test_settings_come_from_meta_and_env_overrides(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        meta = {"actions": ["a", "b"], "window": 20, "stable_n": 6, "threshold": 0.75,
+                "min_hand_frac": 0.5, "frame_stride": 2, "frame_size": [640, 360],
+                "feature_version": F.FEATURE_VERSION, "feature_dim": F.FEATURE_DIM}
+        with tempfile.TemporaryDirectory() as d:
+            loaded = hli.load_model_meta(self.write(d, meta))
+        keys = ("ACTIONS", "SEQUENCE_LENGTH", "STABLE_N", "THRESHOLD", "MIN_HAND_FRAC",
+                "FRAME_STRIDE", "MODEL_COMPLEXITY", "FRAME_SIZE")
+        clean = {k: v for k, v in os.environ.items() if k not in keys}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            s = jetson_main.model_settings(loaded)
+            self.assertEqual(s["actions"], ["a", "b"])
+            self.assertEqual((s["sequence_length"], s["stable_n"], s["threshold"]), (20, 6, 0.75))
+            self.assertEqual((s["min_hand_frac"], s["frame_stride"], s["frame_size"]), (0.5, 2, (640, 360)))
+            with mock.patch.dict(os.environ, {"THRESHOLD": "0.9", "STABLE_N": "9", "FRAME_SIZE": "0"}):
+                s = jetson_main.model_settings(loaded)
+                self.assertEqual((s["threshold"], s["stable_n"], s["frame_size"]), (0.9, 9, None))
+
+    def test_defaults_without_meta_are_the_old_ones(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            s = jetson_main.model_settings({})
+        self.assertEqual(s["actions"], ["hello", "thanks", "iloveyou"])
+        self.assertEqual((s["sequence_length"], s["stable_n"], s["frame_size"]), (30, 10, None))
 
 
 if __name__ == "__main__":

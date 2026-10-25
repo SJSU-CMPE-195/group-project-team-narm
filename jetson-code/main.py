@@ -5,11 +5,11 @@ import os
 import queue
 import threading
 import time
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from holistic_lstm_infer import HolisticLSTMInfer, validate_model
+from holistic_lstm_infer import FEATURE_DIM, HolisticLSTMInfer, load_model_meta, validate_model
 from tcp_ingest_server import PayloadFrame, TCPIngestServer
 
 
@@ -26,10 +26,10 @@ def env_float(name: str, default: float) -> float:
 class FrameSampler:
     """Keep every Nth decoded frame.
 
-    The model is trained on every 2nd frame of 30 fps video (15 fps). The glasses stream defaults
-    to 15 fps, so FRAME_STRIDE=1 keeps every frame to match that timing. Use FRAME_STRIDE=2 for
-    30 fps firmware. The stride is applied to arriving frames (before the queue that drops frames
-    when inference is slow), so it does not depend on how fast inference runs.
+    The model is trained on every 2nd frame of 30 fps video (15 fps). The glasses stream is about
+    30 fps, so FRAME_STRIDE=2 gives the model the same timing it was trained on. The stride is
+    applied to arriving frames (before the queue that drops frames when inference is slow), so it
+    does not depend on how fast inference runs. Set FRAME_STRIDE=1 to use every frame.
     """
 
     def __init__(self, stride: int) -> None:
@@ -52,6 +52,41 @@ def env_bool(name: str, default: bool) -> bool:
 def env_str(name: str, default: str) -> str:
     value = os.environ.get(name)
     return value if value else default
+
+
+def parse_size(text: str) -> Optional[Tuple[int, int]]:
+    """'640x360' -> (640, 360); '' or '0' -> None (no crop/resize to a training size)."""
+    text = text.strip().lower()
+    if not text or text == "0":
+        return None
+    w, h = text.split("x")
+    return int(w), int(h)
+
+
+def model_settings(meta: dict) -> dict:
+    """Decision rules and input format: model_meta.json first, then the environment, then defaults."""
+    actions_env = env_str("ACTIONS", "")
+    if actions_env:
+        actions = [a.strip() for a in actions_env.split(",") if a.strip()]
+    else:
+        actions = list(meta.get("actions") or ["hello", "thanks", "iloveyou"])
+    size_env = os.environ.get("FRAME_SIZE")
+    if size_env is not None:
+        frame_size = parse_size(size_env)
+    elif meta.get("frame_size"):
+        frame_size = (int(meta["frame_size"][0]), int(meta["frame_size"][1]))
+    else:
+        frame_size = None
+    return {
+        "actions": actions,
+        "sequence_length": env_int("SEQUENCE_LENGTH", int(meta.get("window", 30))),
+        "stable_n": env_int("STABLE_N", int(meta.get("stable_n", 10))),
+        "threshold": env_float("THRESHOLD", float(meta.get("threshold", 0.5))),
+        "min_hand_frac": env_float("MIN_HAND_FRAC", float(meta.get("min_hand_frac", 0.6))),
+        "frame_stride": env_int("FRAME_STRIDE", int(meta.get("frame_stride", 2))),
+        "model_complexity": env_int("MODEL_COMPLEXITY", int(meta.get("model_complexity", 0))),
+        "frame_size": frame_size,
+    }
 
 @dataclass
 class LatestState:
@@ -241,39 +276,48 @@ def main() -> None:
     if not model_path:
         raise RuntimeError("Set MODEL_PATH to a trained LSTM model file.")
 
-    sequence_length = env_int("SEQUENCE_LENGTH", 30)
-    stable_n = env_int("STABLE_N", 10)
-    threshold = float(os.environ.get("THRESHOLD", "0.5"))
-    actions_env = env_str("ACTIONS", "")
-    actions: List[str] = (
-        [action.strip() for action in actions_env.split(",") if action.strip()]
-        if actions_env
-        else ["hello", "thanks", "iloveyou"]
-    )
+    # Defaults come from the model_meta.json exported next to the model (the exact settings it was
+    # trained and tested with); an environment variable overrides any single value.
+    meta = load_model_meta(model_path)
+    settings = model_settings(meta)
 
     import tensorflow as tf
 
     model = tf.keras.models.load_model(model_path, compile=False)
     # Stop early with a clear message if the model was trained on a different feature set or word list.
-    validate_model(model, sequence_length, actions)
-    frame_stride = env_int("FRAME_STRIDE", 1)
-    min_hand_frac = env_float("MIN_HAND_FRAC", 0.6)
-    sampler = FrameSampler(frame_stride)
+    validate_model(model, settings["sequence_length"], settings["actions"])
+    sampler = FrameSampler(settings["frame_stride"])
+
+    # One compiled graph for the fixed input shape: much cheaper per call than eager model(x).
+    @tf.function(
+        input_signature=[tf.TensorSpec([1, settings["sequence_length"], FEATURE_DIM], tf.float32)]
+    )
+    def fast_predict(x):
+        return model(x, training=False)
+
     infer = HolisticLSTMInfer(
         model=model,
-        actions=actions,
-        sequence_length=sequence_length,
-        threshold=threshold,
-        stable_n=stable_n,
-        model_complexity=env_int("MODEL_COMPLEXITY", 0),
+        actions=settings["actions"],
+        sequence_length=settings["sequence_length"],
+        threshold=settings["threshold"],
+        stable_n=settings["stable_n"],
+        model_complexity=settings["model_complexity"],
         infer_width=env_int("INFER_WIDTH", 640),
         repeat_reset=env_int("REPEAT_RESET", 15),
-        min_hand_frac=min_hand_frac,
+        min_hand_frac=settings["min_hand_frac"],
+        frame_size=settings["frame_size"],
+        parallel=env_bool("PARALLEL_MEDIAPIPE", True),
+        predict_fn=fast_predict,
     )
     print(
-        f"[main] model={model_path} actions={','.join(actions)} window={sequence_length} "
-        f"frame_stride={frame_stride} threshold={threshold} stable_n={stable_n} "
-        f"min_hand_frac={min_hand_frac}"
+        f"[main] model={model_path} settings from "
+        f"{meta.get('_path', 'defaults (no model_meta.json next to the model)')}"
+    )
+    print(
+        f"[main] actions={','.join(settings['actions'])} window={settings['sequence_length']} "
+        f"frame_stride={settings['frame_stride']} frame_size={settings['frame_size']} "
+        f"threshold={settings['threshold']} stable_n={settings['stable_n']} "
+        f"min_hand_frac={settings['min_hand_frac']} model_complexity={settings['model_complexity']}"
     )
     if payload_format == "jpeg":
         from decode_jpeg import JpegPayloadDecoder
@@ -297,7 +341,7 @@ def main() -> None:
         maxsize=env_int("DECODED_QUEUE_SIZE", 2)
     )
     stats = PipelineStats()
-    latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
+    latest = LatestState(actions=settings["actions"], max_sentence=preview_max_sentence)
 
     if preview_http:
         try:
