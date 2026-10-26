@@ -1,4 +1,4 @@
-# NARM: Offline ASL Recognition Glasses
+# Team 20 (NARM) : Offline ASL Recognition Device
 
 CMPE 195B - Senior Design Project II | San Jose State University | Fall 2026
 
