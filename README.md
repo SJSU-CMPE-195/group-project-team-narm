@@ -329,7 +329,7 @@ The [CI workflow](.github/workflows/ci.yml) checks formatting, firmware compilat
 
 ## Demo
 
-**Current prototype video:** [Watch or download IMG_3969.mp4](IMG_3969.mp4).
+**Current prototype video:** [Watch or download IMG_3969.mp4](https://github.com/SJSU-CMPE-195/group-project-team-narm/blob/demo-vids/Demo%20Videos/IMG_3969.mp4).
 
 The checked-in clip is approximately **51 seconds** long. It provides a video artifact, but does not meet the assignment's required **3-5 minute** duration. Expand or replace it with the final narrated demonstration, and verify playback without signing in before submission.
 
