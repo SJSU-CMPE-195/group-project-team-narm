@@ -39,7 +39,7 @@ The current firmware targets **1920x1080 capture output at 15 FPS**. This is a c
 - Live accuracy, latency, and sustained FPS must be demonstrated on the physical system. A passing unit test or firmware build does not establish these measurements.
 - Glasses packaging, power integration, and validation across additional signers remain unfinished.
 - There is no interactive hardware simulator or recorded-video replay command. Hardware-free logic checks are documented under **Testing**.
-- A public source/build recipe for the team's Jetson container image and the final Implementation 2 demo link are still pending.
+- A public source/build recipe for the team's Jetson container image is still pending. The current prototype video is linked under **Demo**, but a full 3-5 minute narrated submission video is still needed.
 
 Runtime recognition uses the local network and requires no cloud inference service. Initial tool installation, package downloads, and MediaPipe model caching can require internet access.
 
@@ -329,9 +329,11 @@ The [CI workflow](.github/workflows/ci.yml) checks formatting, firmware compilat
 
 ## Demo
 
-**Implementation 2 demo video: pending.** A public 3-5 minute narrated video link showing the current ESP32-P4-to-Jetson recognition journey has not yet been added. Verify playback without signing in before submission.
+**Current prototype video:** [Watch or download IMG_3969.mp4](IMG_3969.mp4).
 
-The final demonstration should show the physical camera and board, a person performing supported signs, communication/processing evidence, and the resulting predictions. Include at least one complete user journey and briefly identify incomplete features.
+The checked-in clip is approximately **51 seconds** long. It provides a video artifact, but does not meet the assignment's required **3-5 minute** duration. Expand or replace it with the final narrated demonstration, and verify playback without signing in before submission.
+
+The final demonstration should show the physical camera and board, a person performing supported signs, communication/processing evidence, and the resulting predictions. Include at least one complete user journey and briefly identify incomplete features. The clip's narration and end-to-end coverage have not yet been verified.
 
 ### Earlier development evidence
 
@@ -370,7 +372,7 @@ The prototype does not use a database or a cloud recognition API. The planned lo
 
 ### Before the Implementation 2 submission is complete
 
-- Add the final public narrated demo link and evidence from the real recognition system.
+- Expand or replace the linked 51-second prototype clip with a public 3-5 minute narrated demo showing the real recognition system, and include that final link in the submission.
 - Add root `impl.yaml` with an accurate `impl_claim`, setup/build/run/test commands, hardware requirements, demo evidence, and an honest `mock_mode` entry for the supported hardware-free checks.
 - Add `.env.example` with placeholder values and no credentials.
 - Publish the Jetson image source or build recipe and record the exact JetPack release.
