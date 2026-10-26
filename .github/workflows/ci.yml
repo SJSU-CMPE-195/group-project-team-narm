@@ -36,16 +36,21 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build ov5647_capture (ESP32-P4)
+      - name: Build Jetson sender (ESP32-P4)
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.4.1
+          esp_idf_version: v5.4.4
           target: esp32p4
-          path: ov5647_capture
+          path: esp32-p4
 
   sanity:
     needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "CI is set up"
+      - name: Check TCP receiver stop and reconnect behavior
+        run: python3 -m unittest discover -s jetson-code/tests -p test_tcp_ingest_server.py -v
+      - name: Check Jetson sender button and connection control
+        run: python3 esp32-p4/tests/test_jetson_stream_control.py
+      - name: Check Jetson sender with a slow TCP receiver
+        run: python3 esp32-p4/tests/test_jetson_buffer_backpressure.py

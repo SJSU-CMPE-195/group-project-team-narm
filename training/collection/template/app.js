@@ -6,8 +6,8 @@
 // helpers.py:ui_config(). (The placeholder must appear exactly once in this file.)
 //
 // Flow per take:
-//   flash word -> countdown 5..1 -> record N frames (corner counter) ->
-//   upload frames to Python -> MediaPipe QA -> review/replay -> Good (save) / Bad (retry)
+//   flash word -> countdown 3..1 -> record N frames (corner counter) ->
+//   upload frames to Python -> capture-timing check -> review/replay -> Good (save) / Bad (retry)
 //
 // Frames are always saved UNMIRRORED. MIRROR_PREVIEW only changes the live preview.
 (async () => {
@@ -20,8 +20,6 @@
   const S = { stop: false };
   const ui = { mode: 'live', banner: null, count: null, rec: null, slate: null };
   let replay = null;
-  let conn = { pose: [], hand: [], faceStride: 3 };
-
   // ---------------------------------------------------------------- DOM
   const root = document.createElement('div');
   root.style.cssText =
@@ -54,7 +52,6 @@
         <button class="aslb spd" data-s="1">1x</button>
         <button class="aslb spd" data-s="0.5">0.5x</button>
         <button class="aslb spd" data-s="0.25">0.25x</button>
-        <label style="font-size:13px;"><input type="checkbox" id="cSkel"> Show skeleton</label>
       </div>
       <input type="range" id="scrub" min="0" max="${N - 1}" value="0" style="width:100%;">
       <div class="asl-row" style="margin-top:10px;">
@@ -169,54 +166,6 @@
     vctx.fillText(text, W / 2, y);
   }
 
-  function drawSkeleton(ctx, ov) {
-    const SC = 1000;
-    ctx.lineWidth = 2;
-    const P = ov.p || [];
-    if (P.length) {
-      ctx.strokeStyle = 'rgba(138,180,248,0.9)';
-      for (const [a, b] of conn.pose) {
-        if (a * 3 + 2 >= P.length || b * 3 + 2 >= P.length) continue;
-        if (P[a * 3 + 2] < 500 || P[b * 3 + 2] < 500) continue;
-        ctx.beginPath();
-        ctx.moveTo((P[a * 3] / SC) * W, (P[a * 3 + 1] / SC) * H);
-        ctx.lineTo((P[b * 3] / SC) * W, (P[b * 3 + 1] / SC) * H);
-        ctx.stroke();
-      }
-      ctx.fillStyle = 'rgba(232,234,237,0.95)';
-      for (let i = 0; i + 2 < P.length; i += 3) {
-        if (P[i + 2] < 500) continue;
-        ctx.beginPath();
-        ctx.arc((P[i] / SC) * W, (P[i + 1] / SC) * H, 3, 0, 6.2832);
-        ctx.fill();
-      }
-    }
-    const F = ov.f || [];
-    ctx.fillStyle = 'rgba(160,160,160,0.8)';
-    for (let i = 0; i + 1 < F.length; i += 2) {
-      ctx.fillRect((F[i] / SC) * W - 1, (F[i + 1] / SC) * H - 1, 2, 2);
-    }
-    const hand = (arr, line, dot) => {
-      if (!arr || !arr.length) return;
-      ctx.strokeStyle = line;
-      for (const [a, b] of conn.hand) {
-        if (a * 2 + 1 >= arr.length || b * 2 + 1 >= arr.length) continue;
-        ctx.beginPath();
-        ctx.moveTo((arr[a * 2] / SC) * W, (arr[a * 2 + 1] / SC) * H);
-        ctx.lineTo((arr[b * 2] / SC) * W, (arr[b * 2 + 1] / SC) * H);
-        ctx.stroke();
-      }
-      ctx.fillStyle = dot;
-      for (let i = 0; i + 1 < arr.length; i += 2) {
-        ctx.beginPath();
-        ctx.arc((arr[i] / SC) * W, (arr[i + 1] / SC) * H, 3, 0, 6.2832);
-        ctx.fill();
-      }
-    };
-    hand(ov.l, 'rgba(129,201,149,0.95)', 'rgba(129,201,149,1)'); // left hand: green
-    hand(ov.r, 'rgba(253,214,99,0.95)', 'rgba(253,214,99,1)'); // right hand: yellow
-  }
-
   let lastT = performance.now();
   function render() {
     requestAnimationFrame(render);
@@ -240,9 +189,6 @@
       }
       const i = Math.max(0, Math.min(n - 1, Math.floor(replay.pos)));
       vctx.drawImage(replay.imgs[i], 0, 0, W, H);
-      if ($('cSkel').checked && replay.overlay && replay.overlay[i]) {
-        drawSkeleton(vctx, replay.overlay[i]);
-      }
       vctx.fillStyle = 'rgba(0,0,0,0.55)';
       vctx.fillRect(W - 150, 8, 142, 26);
       vctx.fillStyle = '#e8eaed';
@@ -359,7 +305,7 @@
     };
   }
 
-  async function sendAndAnalyze(takeId, frames, meta) {
+  async function sendAndCheck(takeId, frames, meta) {
     await call('asl.begin', [takeId]);
     const CH = 6;
     for (let s = 0; s < frames.length; s += CH) {
@@ -367,17 +313,15 @@
       say(`Uploading frames ${Math.min(s + CH, frames.length)}/${frames.length} ...`);
       await call('asl.upload', [takeId, s, ...chunk]);
     }
-    say('Analyzing hands / pose / face with MediaPipe (a few seconds) ...');
-    return await call('asl.process', [takeId, JSON.stringify(meta)]);
+    say('Checking the capture ...');
+    return await call('asl.check', [takeId, JSON.stringify(meta)]);
   }
-
-  const pct = (v) => Math.round(v * 100) + '%';
 
   function describeQA(qa, meta) {
     const lines = [];
     lines.push(
-      `<b>Detection</b> - left hand ${pct(qa.lh_cov)} | right hand ${pct(qa.rh_cov)} | ` +
-        `either hand ${pct(qa.any_hand_cov)} | pose ${pct(qa.pose_cov)} | face ${pct(qa.face_cov)}`
+      'Watch the replay: your head and <b>both hands</b> should stay in frame for the whole sign, ' +
+        'and you should sign once. If not, click Bad - retry.'
     );
     const bits = [`${qa.measured_fps.toFixed(1)} fps measured`];
     if (meta.dup_frames >= 0) bits.push(`${meta.dup_frames} repeated frames`);
@@ -385,11 +329,6 @@
     bits.push(`max gap ${Math.round(qa.max_gap_ms)} ms`);
     lines.push(`<b>Capture</b> - ${bits.join(' | ')}`);
     const warn = [];
-    if (qa.low_hands) {
-      warn.push(
-        `Hands were visible in only ${pct(qa.any_hand_cov)} of frames (below ${pct(CFG.minHandCoverage)}) - probably retry.`
-      );
-    }
     if (qa.stuttered) {
       warn.push('Capture stuttered (low fps or many repeated frames) - check lighting / close other camera apps.');
     }
@@ -412,7 +351,7 @@
         reject(e);
         return;
       }
-      replay = { imgs, overlay: res.overlay, pos: 0, speed: 1, paused: false };
+      replay = { imgs, pos: 0, speed: 1, paused: false };
       $('qa').innerHTML = describeQA(res.qa, meta);
       $('scrub').value = '0';
       $('bPlay').textContent = 'Pause';
@@ -495,7 +434,6 @@
     $('hdrWord').textContent = CFG.wordDisplay;
     say('Starting camera - click Allow when the browser asks ...');
     const init = await call('asl.init', []);
-    conn = { pose: init.pose_conn, hand: init.hand_conn, faceStride: init.face_stride };
     let saved = init.saved;
     $('hdrCount').textContent = `${saved} / ${CFG.target} saved`;
     if (saved >= CFG.target) {
@@ -529,7 +467,7 @@
       const rec = await recordClip();
       if (!rec) break;
       $('live').innerHTML = '';
-      const res = await sendAndAnalyze(takeId, rec.frames, rec.meta);
+      const res = await sendAndCheck(takeId, rec.frames, rec.meta);
       const decision = await review(rec.frames, res, rec.meta);
       if (decision === 'good') {
         say('Saving ...');

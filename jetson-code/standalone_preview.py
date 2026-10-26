@@ -2,6 +2,10 @@
 
 Protocol: repeated [4-byte big-endian length][H.264 access unit].
 This is intentionally independent of the TensorFlow/ASL pipeline.
+
+Cost control: frames are decoded at full size, but the preview is shrunk with
+INTER_AREA before color conversion, JPEG-encoded once per new frame (shared by
+every browser tab), and capped at --fps frames per second.
 """
 
 from __future__ import annotations
@@ -16,22 +20,28 @@ import av
 import cv2
 import numpy as np
 
+from jpeg_broadcast import JpegBroadcaster
+
 
 class State:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.frame: np.ndarray | None = None
+        self.frame_rgb: np.ndarray | None = None
         self.frames = 0
         self.bytes = 0
         self.started = time.monotonic()
         self.last_frame = 0.0
 
-    def update(self, frame: np.ndarray, payload_size: int) -> None:
+    def update(self, frame_rgb: np.ndarray, payload_size: int) -> None:
         with self.lock:
-            self.frame = frame
+            self.frame_rgb = frame_rgb
             self.frames += 1
             self.bytes += payload_size
             self.last_frame = time.monotonic()
+
+    def counters(self) -> tuple[int, int]:
+        with self.lock:
+            return self.frames, self.bytes
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -44,9 +54,15 @@ def recv_exact(sock: socket.socket, size: int) -> bytes:
     return bytes(data)
 
 
+def new_decoder():
+    decoder = av.CodecContext.create("h264", "r")
+    decoder.thread_type = "AUTO"
+    return decoder
+
+
 def receiver(state: State, bind_host: str, tcp_port: int) -> None:
     while True:
-        decoder = av.CodecContext.create("h264", "r")
+        decoder = new_decoder()
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
                 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -56,28 +72,68 @@ def receiver(state: State, bind_host: str, tcp_port: int) -> None:
                 client, address = server.accept()
                 print(f"[tcp] connected: {address}")
                 with client:
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
                     while True:
                         length = struct.unpack(">I", recv_exact(client, 4))[0]
                         if not 0 < length <= 8 * 1024 * 1024:
-                            raise ConnectionError(f"invalid payload length: {length}")
+                            raise ConnectionError(
+                                f"invalid payload length: {length} "
+                                "(port 5000 is for the ESP32, not a browser; use the HTTP port)"
+                            )
                         payload = recv_exact(client, length)
                         for decoded in decoder.decode(av.Packet(payload)):
-                            # OpenCV uses BGR; PyAV gives RGB.
-                            rgb = decoded.to_ndarray(format="rgb24")
-                            state.update(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), length)
+                            state.update(decoded.to_ndarray(format="rgb24"), length)
         except (ConnectionError, OSError, av.error.FFmpegError) as exc:
             print(f"[tcp] disconnected: {exc}; waiting for reconnect")
             time.sleep(1)
 
 
-def jpeg(frame: np.ndarray) -> bytes:
-    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ok:
-        raise RuntimeError("JPEG encoding failed")
-    return encoded.tobytes()
+def stats_reporter(state: State, interval: float = 5.0) -> None:
+    previous_frames, previous_bytes = state.counters()
+    previous_ts = time.monotonic()
+    while True:
+        time.sleep(interval)
+        frames, total_bytes = state.counters()
+        now = time.monotonic()
+        elapsed = max(now - previous_ts, 0.001)
+        fps = (frames - previous_frames) / elapsed
+        mbps = (total_bytes - previous_bytes) * 8.0 / elapsed / 1_000_000.0
+        print(f"[stats] decoded={fps:.1f}fps rx={mbps:.2f}Mbps")
+        previous_frames, previous_bytes, previous_ts = frames, total_bytes, now
 
 
-def http_server(state: State, bind_host: str, http_port: int) -> None:
+def make_render(state: State, width: int):
+    waiting = np.zeros((360, 640, 3), dtype=np.uint8)
+    cv2.putText(
+        waiting,
+        "Waiting for the ESP32 stream...",
+        (30, 190),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    def render(last_version):
+        with state.lock:
+            frame = state.frame_rgb
+            version = state.frames
+        if frame is None:
+            return (-1, waiting) if last_version != -1 else None
+        if version == last_version:
+            return None
+        h, w = frame.shape[:2]
+        if width > 0 and w > width:
+            frame = cv2.resize(
+                frame, (width, max(1, int(round(h * width / float(w))))), interpolation=cv2.INTER_AREA
+            )
+        return version, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    return render
+
+
+def http_server(broadcaster: JpegBroadcaster, bind_host: str, http_port: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args) -> None:
             pass
@@ -105,19 +161,23 @@ def http_server(state: State, bind_host: str, http_port: int) -> None:
             self.send_header("Cache-Control", "no-cache, private")
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.end_headers()
+            seq = 0
             while True:
-                with state.lock:
-                    frame = None if state.frame is None else state.frame.copy()
-                if frame is not None:
-                    data = jpeg(frame)
+                try:
+                    seq, data = broadcaster.wait_for_next(seq, timeout=2.0)
+                    if data is None:
+                        continue
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
                     self.wfile.write(f"Content-Length: {len(data)}\r\n\r\n".encode())
                     self.wfile.write(data + b"\r\n")
                     self.wfile.flush()
-                time.sleep(0.05)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                    return
 
     print(f"[http] preview: http://{bind_host}:{http_port}")
-    ThreadingHTTPServer((bind_host, http_port), Handler).serve_forever()
+    server = ThreadingHTTPServer((bind_host, http_port), Handler)
+    server.daemon_threads = True
+    server.serve_forever()
 
 
 def main() -> None:
@@ -126,11 +186,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tcp-port", type=int, default=5000)
     parser.add_argument("--http-port", type=int, default=8000)
+    parser.add_argument("--width", type=int, default=640, help="preview width in px (0 = full size)")
+    parser.add_argument("--fps", type=float, default=15.0, help="max preview refresh rate")
+    parser.add_argument("--quality", type=int, default=75, help="JPEG quality 1-100")
     args = parser.parse_args()
 
     state = State()
     threading.Thread(target=receiver, args=(state, "0.0.0.0", args.tcp_port), daemon=True).start()
-    http_server(state, "0.0.0.0", args.http_port)
+    threading.Thread(target=stats_reporter, args=(state,), daemon=True).start()
+    broadcaster = JpegBroadcaster(make_render(state, args.width), max_fps=args.fps, quality=args.quality)
+    broadcaster.start()
+    http_server(broadcaster, "0.0.0.0", args.http_port)
 
 
 if __name__ == "__main__":

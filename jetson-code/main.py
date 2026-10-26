@@ -5,17 +5,41 @@ import os
 import queue
 import threading
 import time
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from holistic_lstm_infer import HolisticLSTMInfer
+from holistic_lstm_infer import FEATURE_DIM, HolisticLSTMInfer, load_model_meta, validate_model
 from tcp_ingest_server import PayloadFrame, TCPIngestServer
 
 
 def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     return int(value) if value else default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    return float(value) if value else default
+
+
+class FrameSampler:
+    """Keep every Nth decoded frame.
+
+    The model is trained on every 2nd frame of 30 fps video (15 fps). The glasses stream is about
+    30 fps, so FRAME_STRIDE=2 gives the model the same timing it was trained on. The stride is
+    applied to arriving frames (before the queue that drops frames when inference is slow), so it
+    does not depend on how fast inference runs. Set FRAME_STRIDE=1 to use every frame.
+    """
+
+    def __init__(self, stride: int) -> None:
+        self.stride = max(int(stride), 1)
+        self._count = 0
+
+    def keep(self) -> bool:
+        keep = self._count % self.stride == 0
+        self._count += 1
+        return keep
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -29,6 +53,41 @@ def env_str(name: str, default: str) -> str:
     value = os.environ.get(name)
     return value if value else default
 
+
+def parse_size(text: str) -> Optional[Tuple[int, int]]:
+    """'640x360' -> (640, 360); '' or '0' -> None (no crop/resize to a training size)."""
+    text = text.strip().lower()
+    if not text or text == "0":
+        return None
+    w, h = text.split("x")
+    return int(w), int(h)
+
+
+def model_settings(meta: dict) -> dict:
+    """Decision rules and input format: model_meta.json first, then the environment, then defaults."""
+    actions_env = env_str("ACTIONS", "")
+    if actions_env:
+        actions = [a.strip() for a in actions_env.split(",") if a.strip()]
+    else:
+        actions = list(meta.get("actions") or ["hello", "thanks", "iloveyou"])
+    size_env = os.environ.get("FRAME_SIZE")
+    if size_env is not None:
+        frame_size = parse_size(size_env)
+    elif meta.get("frame_size"):
+        frame_size = (int(meta["frame_size"][0]), int(meta["frame_size"][1]))
+    else:
+        frame_size = None
+    return {
+        "actions": actions,
+        "sequence_length": env_int("SEQUENCE_LENGTH", int(meta.get("window", 30))),
+        "stable_n": env_int("STABLE_N", int(meta.get("stable_n", 10))),
+        "threshold": env_float("THRESHOLD", float(meta.get("threshold", 0.5))),
+        "min_hand_frac": env_float("MIN_HAND_FRAC", float(meta.get("min_hand_frac", 0.6))),
+        "frame_stride": env_int("FRAME_STRIDE", int(meta.get("frame_stride", 2))),
+        "model_complexity": env_int("MODEL_COMPLEXITY", int(meta.get("model_complexity", 0))),
+        "frame_size": frame_size,
+    }
+
 @dataclass
 class LatestState:
     actions: Sequence[str]
@@ -36,12 +95,33 @@ class LatestState:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     latest_frame_bgr: Optional[np.ndarray] = None
+    latest_frame_rgb: Optional[np.ndarray] = None
     latest_sentence: List[str] = field(default_factory=list)
     latest_probs: Optional[np.ndarray] = None
+    latest_landmarks: Optional[dict] = None
+    # Bumped on every change so the preview can skip re-encoding unchanged data.
+    version: int = 0
 
     def update_frame(self, frame_bgr: np.ndarray) -> None:
         with self._lock:
             self.latest_frame_bgr = frame_bgr.copy()
+            self.version += 1
+
+    def update_frame_rgb(self, frame_rgb: np.ndarray) -> None:
+        """Store the newest decoded frame without copying or converting it.
+
+        Called from the decode thread for every frame, so the preview shows
+        all decoded video and does not wait for MediaPipe/LSTM inference.
+        """
+        with self._lock:
+            self.latest_frame_rgb = frame_rgb
+            self.version += 1
+
+    def set_inference(self, probs: Optional[np.ndarray], landmarks: Optional[dict]) -> None:
+        with self._lock:
+            self.latest_probs = None if probs is None else np.array(probs, copy=True)
+            self.latest_landmarks = landmarks
+            self.version += 1
 
     def push_gloss(self, gloss: str) -> None:
         with self._lock:
@@ -50,6 +130,22 @@ class LatestState:
             self.latest_sentence.append(gloss)
             if len(self.latest_sentence) > self.max_sentence:
                 self.latest_sentence = self.latest_sentence[-self.max_sentence :]
+            self.version += 1
+
+    def preview_snapshot(self) -> tuple:
+        """(version, frame_rgb, sentence, probs, actions, landmarks) for the preview.
+
+        The frame array is shared, not copied; callers must only read it.
+        """
+        with self._lock:
+            return (
+                self.version,
+                self.latest_frame_rgb,
+                list(self.latest_sentence),
+                None if self.latest_probs is None else np.array(self.latest_probs, copy=True),
+                list(self.actions),
+                self.latest_landmarks,
+            )
 
     def snapshot(
         self,
@@ -124,6 +220,7 @@ def start_stats_reporter(
     payload_q: queue.Queue,
     decoded_q: queue.Queue,
     interval: int,
+    extra: Optional[Callable[[], str]] = None,
 ) -> None:
     def report() -> None:
         previous = stats.snapshot()
@@ -152,6 +249,10 @@ def start_stats_reporter(
                 f"queues(payload={payload_q.qsize()},decoded={decoded_q.qsize()}) "
                 f"latency={current['latency_ms']:.1f}ms"
             )
+            if extra is not None:
+                timing = extra()
+                if timing:
+                    print(f"[timing] per inferred frame: {timing}")
             previous = current
             previous_ts = now
 
@@ -164,6 +265,10 @@ def main() -> None:
     preview_http = env_bool("PREVIEW_HTTP", False)
     preview_port = env_int("PREVIEW_PORT", 8000)
     preview_max_sentence = env_int("PREVIEW_MAX_SENTENCE", 5)
+    preview_fps = env_int("PREVIEW_FPS", 30)
+    preview_width = env_int("PREVIEW_WIDTH", 640)
+    preview_quality = env_int("PREVIEW_JPEG_QUALITY", 75)
+    preview_landmarks = env_bool("PREVIEW_LANDMARKS", True)
     payload_format = env_str("PAYLOAD_FORMAT", "h264").strip().lower()
     stats_interval = env_int("STATS_INTERVAL_SEC", 5)
 
@@ -171,25 +276,48 @@ def main() -> None:
     if not model_path:
         raise RuntimeError("Set MODEL_PATH to a trained LSTM model file.")
 
-    sequence_length = env_int("SEQUENCE_LENGTH", 30)
-    stable_n = env_int("STABLE_N", 10)
-    threshold = float(os.environ.get("THRESHOLD", "0.5"))
-    actions_env = env_str("ACTIONS", "")
-    actions: List[str] = (
-        [action.strip() for action in actions_env.split(",") if action.strip()]
-        if actions_env
-        else ["hello", "thanks", "iloveyou"]
-    )
+    # Defaults come from the model_meta.json exported next to the model (the exact settings it was
+    # trained and tested with); an environment variable overrides any single value.
+    meta = load_model_meta(model_path)
+    settings = model_settings(meta)
 
     import tensorflow as tf
 
     model = tf.keras.models.load_model(model_path, compile=False)
+    # Stop early with a clear message if the model was trained on a different feature set or word list.
+    validate_model(model, settings["sequence_length"], settings["actions"])
+    sampler = FrameSampler(settings["frame_stride"])
+
+    # One compiled graph for the fixed input shape: much cheaper per call than eager model(x).
+    @tf.function(
+        input_signature=[tf.TensorSpec([1, settings["sequence_length"], FEATURE_DIM], tf.float32)]
+    )
+    def fast_predict(x):
+        return model(x, training=False)
+
     infer = HolisticLSTMInfer(
         model=model,
-        actions=actions,
-        sequence_length=sequence_length,
-        threshold=threshold,
-        stable_n=stable_n,
+        actions=settings["actions"],
+        sequence_length=settings["sequence_length"],
+        threshold=settings["threshold"],
+        stable_n=settings["stable_n"],
+        model_complexity=settings["model_complexity"],
+        infer_width=env_int("INFER_WIDTH", 640),
+        repeat_reset=env_int("REPEAT_RESET", 15),
+        min_hand_frac=settings["min_hand_frac"],
+        frame_size=settings["frame_size"],
+        parallel=env_bool("PARALLEL_MEDIAPIPE", True),
+        predict_fn=fast_predict,
+    )
+    print(
+        f"[main] model={model_path} settings from "
+        f"{meta.get('_path', 'defaults (no model_meta.json next to the model)')}"
+    )
+    print(
+        f"[main] actions={','.join(settings['actions'])} window={settings['sequence_length']} "
+        f"frame_stride={settings['frame_stride']} frame_size={settings['frame_size']} "
+        f"threshold={settings['threshold']} stable_n={settings['stable_n']} "
+        f"min_hand_frac={settings['min_hand_frac']} model_complexity={settings['model_complexity']}"
     )
     if payload_format == "jpeg":
         from decode_jpeg import JpegPayloadDecoder
@@ -213,16 +341,19 @@ def main() -> None:
         maxsize=env_int("DECODED_QUEUE_SIZE", 2)
     )
     stats = PipelineStats()
-    latest = LatestState(actions=actions, max_sentence=preview_max_sentence)
-    cv2_module = None
+    latest = LatestState(actions=settings["actions"], max_sentence=preview_max_sentence)
 
     if preview_http:
         try:
-            import cv2 as cv2_module
             from preview_http import PreviewHTTPServer
 
             preview_server = PreviewHTTPServer(
-                latest_state=latest, host="0.0.0.0", port=preview_port
+                latest_state=latest,
+                host="0.0.0.0",
+                port=preview_port,
+                max_fps=float(preview_fps),
+                width=preview_width,
+                quality=preview_quality,
             )
             threading.Thread(
                 target=preview_server.serve_forever,
@@ -262,6 +393,11 @@ def main() -> None:
 
             for decoded in decoded_frames:
                 stats.add("decoded")
+                if preview_http:
+                    # Show every decoded frame; do not wait for inference.
+                    latest.update_frame_rgb(decoded.rgb)
+                if not sampler.keep():
+                    continue  # skipped by FRAME_STRIDE; the model only sees every Nth frame
                 work = DecodedWorkFrame(
                     rgb=decoded.rgb,
                     received_ts=payload.received_ts,
@@ -281,7 +417,13 @@ def main() -> None:
         name="tcp-ingest",
         daemon=True,
     ).start()
-    start_stats_reporter(stats, payload_q, decoded_q, max(stats_interval, 1))
+    start_stats_reporter(
+        stats,
+        payload_q,
+        decoded_q,
+        max(stats_interval, 1),
+        extra=infer.timer.summary_and_reset,
+    )
 
     print(
         f"[main] listening {host}:{port}, payload={payload_format}, "
@@ -291,19 +433,19 @@ def main() -> None:
     try:
         while True:
             work = decoded_q.get()
-            if preview_http:
-                try:
-                    latest.update_frame(
-                        cv2_module.cvtColor(work.rgb, cv2_module.COLOR_RGB2BGR)
-                    )
-                except Exception:
-                    pass
 
             try:
                 prediction = infer.push_frame(work.rgb)
             except Exception as exc:
                 print(f"[infer] frame failed: {exc!r}")
                 continue
+
+            if preview_http:
+                try:
+                    landmarks = infer.preview_landmarks() if preview_landmarks else None
+                    latest.set_inference(infer.last_probs, landmarks)
+                except Exception:
+                    pass
 
             stats.add("inferred")
             stats.set_latency((time.monotonic() - work.received_ts) * 1000.0)

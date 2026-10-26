@@ -4,7 +4,7 @@
 The notebooks are assembled from two source files so a fix is made once and
 regenerated, never hand-edited in 32 places:
 
-    template/helpers.py   Python side (MediaPipe, saving, Colab callbacks)
+    template/helpers.py   Python side (saving clips, capture check, Colab callbacks)
     template/app.js       browser UI (word flash, countdown, recording, review)
 
 Usage (run from anywhere):
@@ -41,7 +41,11 @@ WORDS = [
 DISPLAY_OVERRIDES = {
     "i_me": "I / ME",
     "dont_understand": "DON'T UNDERSTAND",
+    "iloveyou": "I LOVE YOU",
 }
+
+# Where the notebooks save takes in Google Drive unless --drive-folder says otherwise.
+DEFAULT_DRIVE_FOLDER = "ASL_collection"
 
 
 def display_name(word):
@@ -81,58 +85,35 @@ def _code(word, index, text, hidden=False):
 INTRO_MD = """\
 # ASL data collection - **{display}**
 
-Records short webcam takes of the sign **{display}** for the new training set and saves the clip,
-MediaPipe keypoints and a manifest row for every take you approve.
+Records short webcam takes of the sign **{display}** for the new training set. Every take you approve is
+saved as a video clip plus a row in `manifest.csv`. Keypoints are extracted later from the clips, so there is
+**nothing to install** in this notebook.
 
 **How to use (desktop Chrome, laptop webcam):**
 
-0. **First, pick the older Colab runtime:** Runtime > Change runtime type > **Runtime version** > **2025.07**
-   (Python 3.11), then Save. The newest runtime (Python 3.13) cannot install the MediaPipe version we need.
-1. Run **1. Install** (about a minute). When it finishes, do **Runtime > Restart session**, then continue from
-   step 2 (do not re-run the install cell).
-2. In **2. Config**, type your first name in `PERSON` (lowercase) and press play.
-3. Press play on **Setup** (it mounts Google Drive so takes survive a disconnect - click Allow).
-4. Press play on **3. Record takes**. Allow camera access when Chrome asks.
-5. For each take the word flashes, a 5-4-3-2-1 countdown runs, then it records
+1. In **1. Config**, type your first name in `PERSON` (lowercase) and press play.
+2. Press play on **Setup** (it mounts Google Drive so takes survive a disconnect - click Allow).
+3. Press play on **2. Record takes**. Allow camera access when Chrome asks.
+4. For each take the word flashes, a 3-2-1 countdown runs, then it records
    {frames} frames ({seconds:.1f} s) with a frame counter in the corner. Sign **{display}** once during the take.
-6. Replay the take (pause, slow-mo, scrub, optional skeleton overlay), then click **Good - save** or **Bad - retry**.
-7. It stops after **{takes}** good takes. Re-running the cell resumes where you left off.
-8. Run **4. Summary** at the end to check the results (and optionally download a zip).
+5. Replay the take (pause, slow-mo, scrub), then click **Good - save** or **Bad - retry**.
+6. It stops after **{takes}** good takes. Re-running the cell resumes where you left off.
+7. Run **3. Summary** at the end to check the results (and optionally download a zip).
 
-**Tips:** keep your head and both hands in frame, sit about where the glasses camera would see a signer,
-use even lighting, and use the same camera position for every take. Saved frames are never mirrored.
+**Tips:** keep your head and both hands in frame the whole time, sit about where the glasses camera would see a
+signer, use even lighting, and use the same camera position for every take. Saved frames are never mirrored.
 Do not change `FPS`, `CLIP_SECONDS`, `WIDTH` or `HEIGHT` - they must match across the whole team.
 
 **If you see an error:**
 
-- *"This Colab runtime uses Python 3.13 ..."* or pip *"No matching distribution found for mediapipe==0.10.18"*:
-  Runtime > Change runtime type > Runtime version > **2025.07** > Save, then re-run **1. Install**.
-- *"no legacy mp.solutions.holistic"*: the wrong MediaPipe is installed. Do the step above, re-run **1. Install**,
-  then **Runtime > Restart session**.
-- *pip "dependency resolver" / "incompatible" warnings*: harmless, ignore them. Just restart the session.
 - *"Set PERSON in the config cell"*: type your first name in `PERSON` and re-run the Config cell.
 - *No camera preview*: use desktop Chrome, click Allow on the camera prompt, and close other apps using the webcam.
-- After any restart, skip **1. Install** and re-run Config, Setup, then Record.
-"""
-
-INSTALL_CODE = """\
-#@title 1. Install requirements { display-mode: "form" }
-# About a minute.
-# Pinned to the version the Jetson runs (newer builds drop mp.solutions.holistic).
-# mediapipe 0.10.18 only ships wheels for Python 3.9-3.12.
-# After this cell finishes, restart the session (Runtime > Restart session), then run the next cells.
-import sys
-if sys.version_info >= (3, 13):
-    raise RuntimeError(
-        "This Colab runtime uses Python %d.%d, which mediapipe 0.10.18 does not support. "
-        "Go to Runtime > Change runtime type > Runtime version, pick 2025.07 "
-        "(Python 3.11), save, and run this cell again." % sys.version_info[:2]
-    )
-!pip install -q mediapipe==0.10.18
+- *"Capture stuttered"* warning: close other apps using the camera and retry the take.
+- After any restart, re-run Config, Setup, then Record.
 """
 
 CONFIG_CODE = '''\
-# ---- 2. Config ------------------------------------------------------------
+# ---- 1. Config ------------------------------------------------------------
 # Only PERSON (and optionally TAKES) should be edited. Everything else must stay
 # identical for every teammate so the datasets line up.
 
@@ -148,18 +129,17 @@ FPS = 30                   # capture rate; 30 lets you derive 15 or 10 fps later
 CLIP_SECONDS = 3.0         # 3.0 s -> 90 frames
 WIDTH, HEIGHT = 640, 360   # 16:9, matches the glasses stream aspect ratio
 JPEG_QUALITY = 0.85
-COUNTDOWN_SECONDS = 5
+COUNTDOWN_SECONDS = 3
 AUTO_CONTINUE = True       # False = click "Start next take" between takes
 MIRROR_PREVIEW = False     # cosmetic: mirrors only the live preview, never the saved frames
-MIN_HAND_COVERAGE = 0.35   # review warns if hands are seen in fewer frames than this
 
 USE_DRIVE = True           # save to Google Drive (recommended; survives disconnects)
-DRIVE_FOLDER = "ASL_collection"
+DRIVE_FOLDER = "{drive_folder}"
 LOCAL_FOLDER = "/content/asl_collection_output"   # used if Drive is off/unavailable
 '''
 
 RUN_PREFIX = '''\
-#@title 3. Record takes - press play { display-mode: "form" }
+#@title 2. Record takes - press play { display-mode: "form" }
 import json
 from IPython.display import display, Javascript
 
@@ -174,7 +154,7 @@ display(Javascript(APP_JS.replace("__CFG__", json.dumps(ui_config()))))
 """
 
 SUMMARY_CODE = """\
-#@title 4. Summary + optional zip download { display-mode: "form" }
+#@title 3. Summary + optional zip download { display-mode: "form" }
 DOWNLOAD_ZIP = False #@param {type:"boolean"}
 summarize()
 if DOWNLOAD_ZIP:
@@ -182,7 +162,7 @@ if DOWNLOAD_ZIP:
 """
 
 
-def build_notebook(word):
+def build_notebook(word, drive_folder=DEFAULT_DRIVE_FOLDER):
     if not re.fullmatch(r"[a-z0-9_]+", word):
         raise ValueError("word must be lowercase letters/digits/underscores: %r" % word)
     display = display_name(word)
@@ -194,11 +174,10 @@ def build_notebook(word):
     frames = 90
     cells = [
         _md(word, 0, INTRO_MD.format(display=display, frames=frames, seconds=3.0, takes=30)),
-        _code(word, 1, INSTALL_CODE, hidden=True),
-        _code(word, 2, CONFIG_CODE.format(word=word, display=display)),
-        _code(word, 3, '#@title Setup - press play (do not edit) { display-mode: "form" }\n' + helpers, hidden=True),
-        _code(word, 4, RUN_PREFIX + app_js.strip("\n") + RUN_SUFFIX, hidden=True),
-        _code(word, 5, SUMMARY_CODE, hidden=True),
+        _code(word, 1, CONFIG_CODE.format(word=word, display=display, drive_folder=drive_folder)),
+        _code(word, 2, '#@title Setup - press play (do not edit) { display-mode: "form" }\n' + helpers, hidden=True),
+        _code(word, 3, RUN_PREFIX + app_js.strip("\n") + RUN_SUFFIX, hidden=True),
+        _code(word, 4, SUMMARY_CODE, hidden=True),
     ]
     return {
         "cells": cells,
@@ -212,11 +191,11 @@ def build_notebook(word):
     }
 
 
-def write_notebook(word, out_dir):
+def write_notebook(word, out_dir, drive_folder=DEFAULT_DRIVE_FOLDER):
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "collect_%s.ipynb" % word)
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(build_notebook(word), fh, indent=1, ensure_ascii=False)
+        json.dump(build_notebook(word, drive_folder), fh, indent=1, ensure_ascii=False)
         fh.write("\n")
     return path
 
@@ -228,6 +207,11 @@ def main(argv=None):
     group.add_argument("--words", help="comma-separated words")
     group.add_argument("--all", action="store_true", help="generate every word in WORDS")
     parser.add_argument("--out", default=DEFAULT_OUT, help="output folder (default: %(default)s)")
+    parser.add_argument(
+        "--drive-folder",
+        default=DEFAULT_DRIVE_FOLDER,
+        help="Google Drive folder the takes are saved under (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.all:
@@ -238,7 +222,7 @@ def main(argv=None):
         words = [args.word.strip()]
 
     for word in words:
-        print("wrote", write_notebook(word, args.out))
+        print("wrote", write_notebook(word, args.out, args.drive_folder))
     print("%d notebook(s) -> %s" % (len(words), args.out))
     return 0
 

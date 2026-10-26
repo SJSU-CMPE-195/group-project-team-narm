@@ -20,7 +20,7 @@ The ESP32 firmware determines which payload format is sent. The receiver must ma
 
 ## Pipeline overview
 
-ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, runs MediaPipe Holistic for keypoints, runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
+ESP32 sends length-prefixed frames over TCP. For the H.264 path, the receiver decodes frames, keeps every `FRAME_STRIDE`-th one, runs MediaPipe **Pose + Hands** (no face mesh) for keypoints (`asl_features.py`, 258 values per frame), runs the Keras LSTM for gloss prediction, and prints stable predictions to stdout.
 
 Until the ESP32 connects and sends frames, `main.py` blocks waiting on an internal queue—no `[gloss]` lines will appear.
 
@@ -28,7 +28,7 @@ Until the ESP32 connects and sends frames, `main.py` blocks waiting on an intern
 flowchart LR
   esp32[ESP32_tcp_sender] -->|len_u32be_payload| jetsonTcp[jetson_tcp_ingest]
   jetsonTcp --> decode[decode_h264_PyAV or jpeg_decode]
-  decode --> mp[MediaPipe_holistic]
+  decode --> mp[MediaPipe_pose_and_hands]
   mp --> lstm[TensorFlow_Keras_LSTM]
   lstm --> stdout[gloss_print_stdout]
 ```
@@ -194,14 +194,26 @@ python3 -c "import av; print('av', av.__version__)"
 
 ## Model file and `MODEL_PATH`
 
-**Supported default for this stack:** `jetson-code/models/action.h5` (loads with **TensorFlow 2.15.1 / Keras 2.15** as used above).
+**Supported for this stack:** an `.h5` trained with the no-face notebook, e.g. `jetson-code/models/action_3word_noface.h5` (saved and loaded with **TensorFlow 2.15.1 / Keras 2.15** as used above). The older `jetson-code/models/action.h5` is the legacy 1662-feature Holistic model and no longer runs with the current `main.py` (see below).
+
+**No-face models (current code).** `main.py` now extracts **258 features per frame** (MediaPipe Pose + Hands, no face) with `asl_features.py`. This file must be the same one the model was trained with: the 3-word Colab notebook writes it next to the model (`asl_features.py` and `model_meta.json` are downloaded together with `action_3word_noface.h5`). A model trained on the old 1662-feature Holistic layout (such as the original `models/action.h5`) is rejected at startup with an explanatory error; it needs the previous version of this code or retraining. `main.py` also checks that the model's window length (`SEQUENCE_LENGTH`) and number of outputs (`ACTIONS`) fit.
+
+**Settings come from `model_meta.json`.** Keep `model_meta.json` in the same folder as the `.h5`. `main.py` reads the word list, window length, frame stride, frame size, threshold, stable count, hand rule and MediaPipe complexity from it, so the Jetson uses exactly the settings the model was trained and tested with (the same ones the local live test `live_local.py` uses). Any environment variable below still overrides a single value. Without `model_meta.json` the old defaults are used. The startup log shows which file the settings came from and their values.
+
+Typical run for the 3-word model (everything else comes from `models/model_meta.json`):
+
+```bash
+MODEL_PATH=.../jetson-code/models/action_3word_noface.h5 python3 main.py
+```
+
+The first run may download MediaPipe's pose landmark model (`pose_landmark_lite.tflite`), so the Nano needs internet once (or the file already in the MediaPipe package folder).
 
 Other `.h5` files under `models/` are not validated for this README’s pinned environment; they may require different TensorFlow/Keras versions.
 
 Set the absolute path inside the container, e.g.:
 
 ```bash
-export MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5
+export MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5
 ```
 
 ## Wi-Fi / networking (ESP32)
@@ -292,10 +304,15 @@ Set the Jetson IP address to `10.42.0.1` and TCP port to `5000`.
 
 Use the **actual** IPv4 from `ip -4 addr` on the AP interface if it differs.
 
-**3. Camera/codec mode**
+**3. Streaming mode**
 
-The canonical firmware always uses the OV5647 MIPI-CSI camera and P4 hardware
-H.264 encoder. Configure resolution, FPS, bitrate, GOP, and QP in menuconfig.
+Under **Camera Streaming Configuration → Streaming mode**, choose
+**Send H.264 over TCP to Jetson** (the checked-in `sdkconfig.defaults` selects it; an existing
+`sdkconfig` keeps its old value until you change it in menuconfig or delete it). The other modes
+(browser H.264 and browser MJPEG) serve a web page from the ESP32 and send nothing to the Jetson, so
+they are for camera-only previews at `http://<esp32-ip>/` and cannot be used for translation.
+The firmware always uses the OV5647 MIPI-CSI camera and P4 hardware H.264 encoder. Configure
+resolution, FPS, bitrate, GOP, and QP in menuconfig.
 
 Rebuild and flash the firmware after changing these values.
 
@@ -307,7 +324,7 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 
 **Required:**
 
-- **`MODEL_PATH`** — path to the trained LSTM model (use `models/action.h5` for the documented stack)
+- **`MODEL_PATH`** — path to the trained LSTM model (a no-face `.h5` such as `models/action_3word_noface.h5`; 258 features per frame)
 
 **Optional:**
 
@@ -323,10 +340,26 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 - **`PREVIEW_HTTP`** (default `0`) — if `1`, start a local MJPEG preview server (browser view of the decoded stream)
 - **`PREVIEW_PORT`** (default `8000`) — port for the MJPEG preview server
 - **`PREVIEW_MAX_SENTENCE`** (default `5`) — max number of gloss tokens shown in the preview “sentence” bar
-- **`SEQUENCE_LENGTH`** (default `30`)
-- **`STABLE_N`** (default `10`)
-- **`THRESHOLD`** (default `0.5`)
-- **`ACTIONS`** — comma-separated class names (default `hello,thanks,iloveyou`)
+- **`PREVIEW_FPS`** (default `30`) — max refresh rate of the preview page (decoding and inference are not limited by this)
+- **`PREVIEW_WIDTH`** (default `640`) — preview width in pixels; frames are shrunk before color conversion and JPEG encoding (`0` keeps the decoded size)
+- **`PREVIEW_JPEG_QUALITY`** (default `75`) — preview JPEG quality
+- **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose and hands) on the preview
+The next settings default to the value in `model_meta.json` next to the model; the default in brackets is only used when the meta file has no value.
+
+- **`MODEL_COMPLEXITY`** (meta `model_complexity`, else `0`) — MediaPipe Pose/Hands complexity: `0` fastest, `1`, `2` slowest. The model must see the same landmarks it was trained on, so only change this if you retrain with the same value
+- **`FRAME_STRIDE`** (meta `frame_stride`, else `2`) — use every Nth decoded frame. The model is trained on every 2nd frame of 30 fps video (15 fps); the glasses stream is about 30 fps, so `2` matches training. Use `1` if the stream is already about 15 fps. Applied before the frame-dropping queue, so it does not depend on inference speed
+- **`FRAME_SIZE`** (meta `frame_size`, e.g. `640x360`) — each frame is center-cropped to this aspect ratio and resized to this size before MediaPipe, exactly like the training clips (never stretched). `0` turns it off and falls back to `INFER_WIDTH`
+- **`MIN_HAND_FRAC`** (meta `min_hand_frac`, else `0.6`) — only run the LSTM when a hand was detected in at least this share of the last `SEQUENCE_LENGTH` frames (the training windows use the same rule). With no hands in view nothing is predicted, which also saves compute. `0` turns the check off
+- **`SEQUENCE_LENGTH`** (meta `window`, else `30`)
+- **`STABLE_N`** (meta `stable_n`, else `10`)
+- **`THRESHOLD`** (meta `threshold`, else `0.5`)
+- **`ACTIONS`** — comma-separated class names (meta `actions`, else `hello,thanks,iloveyou`)
+
+Not in the meta file:
+
+- **`PARALLEL_MEDIAPIPE`** (default `1`) — run MediaPipe Pose and Hands in two threads at the same time. Same keypoints, roughly half the MediaPipe time on a multi-core CPU. `0` runs them one after the other
+- **`INFER_WIDTH`** (default `640`) — only used when there is no `FRAME_SIZE`: frames are shrunk to this width before MediaPipe (`0` = full size)
+- **`REPEAT_RESET`** (default `15`) — after this many inferences without a confident new word, the last word is forgotten so the same word can be reported again (`0` = never)
 
 ## Run
 
@@ -336,7 +369,7 @@ From `jetson-code/`:
 cd /workspace/group-project-team-narm/jetson-code
 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
 PAYLOAD_FORMAT=h264 \
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5 \
 python3 main.py
 ```
 
@@ -351,7 +384,7 @@ Run with preview enabled:
 ```bash
 cd /workspace/group-project-team-narm/jetson-code
 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 \
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5 \
 PREVIEW_HTTP=1 PREVIEW_PORT=8000 \
 python3 main.py
 ```
@@ -360,6 +393,17 @@ Then open the preview page in a browser:
 
 - If you are using the Jetson as a Wi‑Fi hotspot with NetworkManager (common default gateway): **`http://10.42.0.1:8000/`**
 - Otherwise: use the actual IPv4 shown by `ip -4 addr show dev <your_ap_iface>` and open `http://<that_ip>:8000/`
+
+What the page shows: the decoded video (every frame, not only the ones the model has processed),
+the MediaPipe skeleton, the recognized-word sentence bar, and the per-class probability bars. The video
+is shrunk to `PREVIEW_WIDTH` and refreshed at most `PREVIEW_FPS` times per second, and each frame is
+JPEG-encoded once and shared by all open tabs. Skeleton and probabilities update at the model's own
+rate, so they can lag the video slightly.
+
+Camera-only check (no model, no TensorFlow): `python3 standalone_preview.py` serves the same kind of
+page on port 8000 and prints a `[stats] decoded=...fps rx=...Mbps` line every 5 seconds. Options:
+`--width`, `--fps`, `--quality`, `--tcp-port`, `--http-port`. Never open the TCP port (5000) in a
+browser; it is only for the ESP32.
 
 Notes:
 
@@ -388,7 +432,7 @@ echo 'export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python' >> ~/.bashrc
 source ~/.bashrc
 
 python3 -c "import tensorflow, mediapipe, cv2, av; print('deps ok')"
-MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action.h5 python3 main.py
+MODEL_PATH=/workspace/group-project-team-narm/jetson-code/models/action_3word_noface.h5 python3 main.py
 ```
 
 ## Expected output

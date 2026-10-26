@@ -7,10 +7,17 @@ from typing import Callable, Optional
 
 
 @dataclass(frozen=True)
-class H264Frame:
+class PayloadFrame:
+    """One length-prefixed payload (an H.264 access unit or a JPEG) from the ESP32."""
+
     payload: bytes
     received_ts: float
     stream_id: int = 0
+
+
+# Preserve imports used by older H.264-only receivers. PayloadFrame also
+# describes the legacy JPEG payloads supported by main.py.
+H264Frame = PayloadFrame
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -30,7 +37,7 @@ class TCPIngestServer:
         self,
         host: str = "0.0.0.0",
         port: int = 5000,
-        on_frame: Optional[Callable[[H264Frame], None]] = None,
+        on_frame: Optional[Callable[[PayloadFrame], None]] = None,
         backlog: int = 1,
         max_payload_bytes: int = 8 * 1024 * 1024,
     ):
