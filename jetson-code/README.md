@@ -198,11 +198,12 @@ python3 -c "import av; print('av', av.__version__)"
 
 **No-face models (current code).** `main.py` now extracts **258 features per frame** (MediaPipe Pose + Hands, no face) with `asl_features.py`. This file must be the same one the model was trained with: the 3-word Colab notebook writes it next to the model (`asl_features.py` and `model_meta.json` are downloaded together with `action_3word_noface.h5`). A model trained on the old 1662-feature Holistic layout (such as the original `models/action.h5`) is rejected at startup with an explanatory error; it needs the previous version of this code or retraining. `main.py` also checks that the model's window length (`SEQUENCE_LENGTH`) and number of outputs (`ACTIONS`) fit.
 
-Typical run for the 3-word model (the notebook prints the exact line):
+**Settings come from `model_meta.json`.** Keep `model_meta.json` in the same folder as the `.h5`. `main.py` reads the word list, window length, frame stride, frame size, threshold, stable count, hand rule and MediaPipe complexity from it, so the Jetson uses exactly the settings the model was trained and tested with (the same ones the local live test `live_local.py` uses). Any environment variable below still overrides a single value. Without `model_meta.json` the old defaults are used. The startup log shows which file the settings came from and their values.
+
+Typical run for the 3-word model (everything else comes from `models/model_meta.json`):
 
 ```bash
-MODEL_PATH=.../jetson-code/models/action_3word_noface.h5 ACTIONS=hello,thanks,iloveyou \
-FRAME_STRIDE=2 SEQUENCE_LENGTH=30 THRESHOLD=0.8 STABLE_N=10 python3 main.py
+MODEL_PATH=.../jetson-code/models/action_3word_noface.h5 python3 main.py
 ```
 
 The first run may download MediaPipe's pose landmark model (`pose_landmark_lite.tflite`), so the Nano needs internet once (or the file already in the MediaPipe package folder).
@@ -343,15 +344,22 @@ Runtime inference does not require WAN. **Provisioning** the Jetson/container (D
 - **`PREVIEW_WIDTH`** (default `640`) — preview width in pixels; frames are shrunk before color conversion and JPEG encoding (`0` keeps the decoded size)
 - **`PREVIEW_JPEG_QUALITY`** (default `75`) — preview JPEG quality
 - **`PREVIEW_LANDMARKS`** (default `1`) — draw the MediaPipe skeleton (pose and hands) on the preview
-- **`MODEL_COMPLEXITY`** (default `0`) — MediaPipe Pose/Hands complexity: `0` fastest, `1`, `2` slowest. The training notebook uses `0`; the model must see the same landmarks it was trained on, so only change this if you retrain with the same value
-- **`FRAME_STRIDE`** (default `2`) — use every Nth decoded frame. The model is trained on every 2nd frame of 30 fps video (15 fps); the glasses stream is about 30 fps, so `2` matches training. Use `1` if the stream is already about 15 fps. Applied before the frame-dropping queue, so it does not depend on inference speed
-- **`MIN_HAND_FRAC`** (default `0.6`) — only run the LSTM when a hand was detected in at least this share of the last `SEQUENCE_LENGTH` frames (the training windows use the same rule). With no hands in view nothing is predicted, which also saves compute. `0` turns the check off
-- **`INFER_WIDTH`** (default `640`) — frames are shrunk to this width before MediaPipe (`0` = full size). Landmarks are normalized, so the model input does not change
+The next settings default to the value in `model_meta.json` next to the model; the default in brackets is only used when the meta file has no value.
+
+- **`MODEL_COMPLEXITY`** (meta `model_complexity`, else `0`) — MediaPipe Pose/Hands complexity: `0` fastest, `1`, `2` slowest. The model must see the same landmarks it was trained on, so only change this if you retrain with the same value
+- **`FRAME_STRIDE`** (meta `frame_stride`, else `2`) — use every Nth decoded frame. The model is trained on every 2nd frame of 30 fps video (15 fps); the glasses stream is about 30 fps, so `2` matches training. Use `1` if the stream is already about 15 fps. Applied before the frame-dropping queue, so it does not depend on inference speed
+- **`FRAME_SIZE`** (meta `frame_size`, e.g. `640x360`) — each frame is center-cropped to this aspect ratio and resized to this size before MediaPipe, exactly like the training clips (never stretched). `0` turns it off and falls back to `INFER_WIDTH`
+- **`MIN_HAND_FRAC`** (meta `min_hand_frac`, else `0.6`) — only run the LSTM when a hand was detected in at least this share of the last `SEQUENCE_LENGTH` frames (the training windows use the same rule). With no hands in view nothing is predicted, which also saves compute. `0` turns the check off
+- **`SEQUENCE_LENGTH`** (meta `window`, else `30`)
+- **`STABLE_N`** (meta `stable_n`, else `10`)
+- **`THRESHOLD`** (meta `threshold`, else `0.5`)
+- **`ACTIONS`** — comma-separated class names (meta `actions`, else `hello,thanks,iloveyou`)
+
+Not in the meta file:
+
+- **`PARALLEL_MEDIAPIPE`** (default `1`) — run MediaPipe Pose and Hands in two threads at the same time. Same keypoints, roughly half the MediaPipe time on a multi-core CPU. `0` runs them one after the other
+- **`INFER_WIDTH`** (default `640`) — only used when there is no `FRAME_SIZE`: frames are shrunk to this width before MediaPipe (`0` = full size)
 - **`REPEAT_RESET`** (default `15`) — after this many inferences without a confident new word, the last word is forgotten so the same word can be reported again (`0` = never)
-- **`SEQUENCE_LENGTH`** (default `30`)
-- **`STABLE_N`** (default `10`)
-- **`THRESHOLD`** (default `0.5`)
-- **`ACTIONS`** — comma-separated class names (default `hello,thanks,iloveyou`)
 
 ## Run
 
