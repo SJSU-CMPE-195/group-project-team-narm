@@ -10,7 +10,7 @@ The checked-in defaults select **Send H.264 over TCP to Jetson** with:
 
 - Wi-Fi SSID `ASLHotspot`, password `YourStrongPassphrase`
 - Jetson `10.42.0.1:5000`
-- Native OV5647 capture at **1920x1080**, with a **30 FPS** capture target and no resize
+- Native OV5647 capture at **1920x1080**, with a **15 FPS** capture output target and no resize
 - **GPIO35**, the onboard **BOOT** button, as the active-low stream toggle
 - **Start streaming automatically after Wi-Fi connects** enabled
 
@@ -23,8 +23,12 @@ enables its internal pull-up. Choose a free pin if changing the GPIO.
 
 Start `jetson-code/main.py` on the Jetson before powering or resetting the board. After building
 and flashing, expect `connected to Jetson at 10.42.0.1:5000`, followed by
-`stats:` lines every five seconds. Approximately 27 FPS is the demo throughput
+`stats:` lines every five seconds. Approximately 15 FPS is the demo throughput
 target; measured throughput depends on the hardware and network.
+
+The sensor stays in its native 1080p30 mode. The video driver delivers every
+other frame, so encoding and streaming run at 15 FPS. The Jetson defaults to
+`FRAME_STRIDE=1` to use every delivered frame and match the model's 15 FPS training.
 
 Existing local `sdkconfig` values override defaults. Check the streaming mode,
 network settings, GPIO, resolution, and enabled autostart in `idf.py menuconfig`
@@ -43,7 +47,7 @@ Use a browser with H.264-in-MP4 MediaSource support, such as a supported desktop
 Chrome/Edge build. The player checks the exact codec from the encoder's SPS and
 shows an error if the browser cannot decode it. It uses no CDN assets.
 
-The defaults are native **1920x1080**, a **30 FPS** capture target, **4 Mbps**
+The defaults are native **1920x1080**, a **15 FPS** capture output target, **4 Mbps**
 H.264 target bitrate, three camera buffers, two encoded buffers, and a 32 KiB
 TCP send buffer. Actual sent/displayed FPS still depends on Wi-Fi and decoding.
 There is no CPU resize or JPEG re-encoding. The MJPEG width/height settings are
@@ -98,9 +102,9 @@ Set these menu items:
    - Wi-Fi SSID and password (2.4 GHz).
 2. **Camera Streaming Configuration**
    - Under **Streaming mode**, select **Send H.264 over TCP to Jetson** for the demo.
-   - Set Jetson IP **10.42.0.1**, TCP port **5000**, button GPIO **35**, and
-     capture dimensions **1920x1080**. Enable **Start streaming automatically
-     after Wi-Fi connects**.
+   - Set Jetson IP **10.42.0.1**, TCP port **5000**, button GPIO **35**,
+     capture dimensions **1920x1080**, and capture frame rate **15**. Enable
+     **Start streaming automatically after Wi-Fi connects**.
    - For direct browser playback, select **Serve browser H.264 stream (native
      capture)** and adjust its HTTP port and H.264 settings if needed.
    - To restore MJPEG, select **Serve browser MJPEG stream**. Set **Frame width
@@ -114,7 +118,7 @@ MIPI-CSI sensor, the ISP pipeline, and the ESP32-P4 hardware video support.
 The MJPEG fallback performance defaults are:
 
 - 1920x1080 capture, resized to a 1280x720 MJPEG stream
-- 30 FPS camera configuration (measured stream FPS depends on throughput)
+- 15 FPS capture output configuration (measured stream FPS depends on throughput)
 - JPEG quality 70
 - Three camera buffers
 - 32 KiB TCP send buffer (uses more RAM while sending)
@@ -131,7 +135,7 @@ to run `set-target` again when this project is already targeting `esp32p4`;
 that command resets project configuration, including Wi-Fi credentials.
 
 The camera's capture dimensions and the JPEG output dimensions are logged
-separately. For 720p, expect `camera ready: 1920x1080 @ 30 fps` followed by
+separately. For 720p, expect `camera ready: 1920x1080 @ 15 fps` followed by
 `MJPEG output: 1280x720`. The nearest-neighbor resize samples the entire image
 without cropping, preserving the field of view when the aspect ratio matches.
 Matching the output dimensions to capture dimensions bypasses resizing.
@@ -201,7 +205,7 @@ From jetson-code:
 
 Every five seconds the ESP prints:
 
-    stats: encoded=150 sent=150 fps=30.0 bitrate=3.92Mbps queue=0 age=2.1ms
+    stats: encoded=75 sent=75 fps=15.0 bitrate=3.92Mbps queue=0 age=2.1ms
 
 The Jetson prints receive, decode, inference, queue, drop, and end-to-end
 latency measurements separately. Use both lines when tuning:

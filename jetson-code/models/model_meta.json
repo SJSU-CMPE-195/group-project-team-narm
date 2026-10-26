@@ -6,14 +6,14 @@
     "iloveyou"
   ],
   "window": 20,
-  "frame_stride": 2,
+  "frame_stride": 1,
   "capture_fps": 30,
   "effective_fps": 15.0,
   "feature_dim": 258,
   "feature_version": "pose-hands-v1",
-  "min_hand_frac": 0.6,
-  "stable_n": 6,
-  "threshold": 0.75,
+  "min_hand_frac": 0.8,
+  "stable_n": 12,
+  "threshold": 0.85,
   "frame_size": [
     640,
     360

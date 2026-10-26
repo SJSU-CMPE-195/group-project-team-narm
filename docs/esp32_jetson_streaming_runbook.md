@@ -66,8 +66,11 @@ Configure:
   For an external momentary switch, use a free configured GPIO and GND.
   The firmware enables the internal pull-up and detects an active-low press.
 - Enable **Start streaming automatically after Wi-Fi connects**.
-- Frame width `1920`, height `1080`, FPS `30`. The sender uses native capture
+- Frame width `1920`, height `1080`, FPS `15`. The sender uses native capture
   without resizing. Start with 4 Mbps, I-frame period 30, QP 25 to 35.
+  The sensor remains in its 1080p30 mode; the driver delivers every other frame
+  to encoding and streaming. Use the Jetson default `FRAME_STRIDE=1` so the model
+  receives the same 15 FPS timing used in training.
 
 These demo values are in `esp32-p4/sdkconfig.defaults`; existing `sdkconfig`
 settings take precedence, so check them before rebuilding. Avoid repeating
@@ -87,7 +90,7 @@ After Wi-Fi connects, streaming starts automatically. Expected ESP logs:
     video started
     stats: encoded=... sent=... fps=... bitrate=... queue=... age=...ms
 
-The demo target is roughly 27 to 30 measured FPS. Press BOOT to stop
+The demo target is roughly 15 measured FPS. Press BOOT to stop
 capture and close the connection; expect `stream stopped`. Press again to
 reconnect. Measure this on the board; a successful build does not verify FPS.
 
@@ -116,7 +119,7 @@ fully decoded RGB frames.
 
 Start with:
 
-- 1920x1080 at 30 FPS
+- 1920x1080 at 15 FPS
 - 4 Mbps
 - I-frame period 30
 - QP range 25 to 35

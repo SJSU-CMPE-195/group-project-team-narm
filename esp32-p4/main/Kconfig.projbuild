@@ -114,11 +114,13 @@ menu "Camera Streaming Configuration"
 
     config EXAMPLE_FRAME_FPS
         int "Capture frame rate"
-        default 30
+        default 15
         range 5 60
         help
-            Requested camera frame rate. The OV5647 board configuration uses
-            1080p30. This sets the camera rate, not measured stream throughput.
+            Requested capture output frame rate. The OV5647 sensor runs at
+            1080p30; the driver delivers every other frame for the 15 FPS default.
+            Use a rate that divides the sensor's native FPS. Measured stream
+            throughput still depends on encoding and network performance.
 
     config EXAMPLE_H264_I_PERIOD
         int "H.264 I-frame period (frames)"
