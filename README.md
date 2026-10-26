@@ -199,7 +199,16 @@ unset WIFI_PASSWORD
 
 Use the reported IPv4 address in the ESP32 configuration. Allow the receiver TCP port and optional preview HTTP port on this local network.
 
-The Python application reads shell environment variables directly; it does not automatically load a `.env` file. A committed `.env.example` listing these settings with placeholders is still pending. No real Wi-Fi credentials or private tokens belong in this README or tracked configuration.
+The Python application reads shell environment variables directly; it does not automatically load a `.env` file. The root [.env.example](.env.example) lists non-secret example settings and optional model overrides. When creating a new local configuration, copy it to the ignored `.env` file and edit as needed. From the repository root inside the prepared Jetson environment, load it with:
+
+```bash
+set -a
+. ./.env
+set +a
+python3 jetson-code/main.py
+```
+
+The template's relative `MODEL_PATH` assumes startup from the repository root. The [impl.yaml](impl.yaml) run command also loads a local `.env` when present. No real Wi-Fi credentials or private tokens belong in this README or tracked configuration.
 
 | Variable | Purpose |
 | --- | --- |
@@ -288,6 +297,8 @@ No predictions while the receiver is waiting for frames is expected. For connect
 
 ### Hardware-free logic checks
 
+The root [impl.yaml](impl.yaml) describes setup, firmware build, live startup, and verification commands. Its `mock_mode` uses the unit tests and C harnesses below; it is not an interactive camera simulator. Run its `setup` commands first. Firmware compilation still requires an activated ESP-IDF environment, and live startup still requires the prepared Jetson runtime and camera hardware.
+
 From the repository root, activate the environment prepared in Installation step 2:
 
 ```bash
@@ -373,8 +384,8 @@ The prototype does not use a database or a cloud recognition API. The planned lo
 ### Before the Implementation 2 submission is complete
 
 - Expand or replace the linked 51-second prototype clip with a public 3-5 minute narrated demo showing the real recognition system, and include that final link in the submission.
-- Add root `impl.yaml` with an accurate `impl_claim`, setup/build/run/test commands, hardware requirements, demo evidence, and an honest `mock_mode` entry for the supported hardware-free checks.
-- Add `.env.example` with placeholder values and no credentials.
+- Run the commands in [impl.yaml](impl.yaml) in the documented environments and review its hardware requirements, known limitations, and demo evidence before tagging the submission.
+- Review [.env.example](.env.example) for the target environment and keep real credentials in ignored local configuration.
 - Publish the Jetson image source or build recipe and record the exact JetPack release.
 - Investigate the failing Linux CI sanity check and rerun verification.
 - Commit and publish the final changes, tag the exact graded commit `impl2-v1`, push the tag, and submit the repository and demo links on Canvas. A pull request alone does not create the required tag or Canvas submission.

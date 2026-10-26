@@ -1,0 +1,96 @@
+# Commands run from the repository root on Ubuntu 22.04 / Bash.
+# Prerequisites: Python 3.10 with venv support and GCC on PATH.
+# Firmware builds additionally need an activated ESP-IDF 5.4.4 environment.
+project_name: "Team 20 (NARM): Offline ASL Recognition Device"
+project_type: "embedded"
+impl_claim: >-
+  An OV5647 camera feeds the ESP32-P4 hardware H.264 encoder. Video travels
+  over local Wi-Fi and TCP to a Jetson, where MediaPipe Pose + Hands and a
+  TensorFlow/Keras LSTM classify hello, thanks, and iloveyou. Stable sign
+  labels appear in the terminal and optional browser preview.
+languages: ["c", "python", "javascript"]
+hardware_required: true
+
+# Lightweight dependencies for the hardware-free checks, not the Jetson runtime.
+setup:
+  - "python3 -m venv .venv"
+  - ".venv/bin/python -m pip install --upgrade pip"
+  - ".venv/bin/python -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84"
+
+build:
+  - "idf.py -C esp32-p4 build"
+
+test:
+  - >-
+    .venv/bin/python -c "import cv2, numpy, shutil;
+    assert shutil.which('gcc'), 'Install GCC to run the firmware host harnesses'"
+  - ".venv/bin/python -B -m unittest discover -s jetson-code/tests -v"
+  - '.venv/bin/python -B -m unittest discover -s esp32-p4/tests -p "test_jetson*.py" -v'
+
+# Run inside the prepared Jetson environment described in README.md.
+# A local .env is optional; the application itself does not load dotenv files.
+run:
+  - |
+    set -eu
+    if [ -f .env ]; then
+      set -a
+      . ./.env
+      set +a
+    fi
+    export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+    export MODEL_PATH="${MODEL_PATH:-$PWD/jetson-code/models/action_3word_noface.h5}"
+    export PAYLOAD_FORMAT="${PAYLOAD_FORMAT:-h264}"
+    export FRAME_STRIDE="${FRAME_STRIDE:-1}"
+    export PREVIEW_HTTP="${PREVIEW_HTTP:-1}"
+    python3 jetson-code/main.py
+
+# Finite, hardware-free checks with simulated landmarks/model outputs and C shims.
+# Run setup first. This is not an interactive camera or trained-model simulator.
+mock_mode:
+  available: true
+  commands:
+    - >-
+      .venv/bin/python -c "import cv2, numpy, shutil;
+      assert shutil.which('gcc'), 'Install GCC to run the firmware host harnesses'"
+    - ".venv/bin/python -B -m unittest discover -s jetson-code/tests -v"
+    - '.venv/bin/python -B -m unittest discover -s esp32-p4/tests -p "test_jetson*.py" -v'
+
+demo:
+  video: "https://drive.google.com/file/d/1A4Y7zdy7tJOgDVsvDLxaS4mWCQmrubZf/view?usp=sharing"
+  screenshots: []
+
+notes: |
+  Execute each command from the repository root. Setup requires internet access
+  to download Python packages. Install Python 3.10, python3-venv, and GCC before
+  running setup/test/mock_mode; these host checks need no board, GPU, TensorFlow,
+  MediaPipe runtime, credentials, or live network stream.
+
+  Build requires ESP-IDF 5.4.4 installed and its export.sh sourced in the calling
+  environment, plus internet access for the first managed-component download.
+  A physical board is not required to compile. See README.md for toolchain setup.
+
+  Live run requires the ESP32-P4-WIFI6/ESP32-C6 board, OV5647, local Wi-Fi, and the
+  prepared JetPack 6 / Python 3.10 environment documented in README.md. Install
+  jetson-code/requirements.txt and MediaPipe 0.10.18 in that environment using
+  the documented install order. Setup above does not install this Jetson stack.
+  The team's container image has no published registry/build recipe yet, and
+  the exact JetPack minor release still needs to be recorded.
+
+  The supplied model and model_meta.json must remain together under
+  jetson-code/models/. Cache any MediaPipe landmark assets while online before
+  an offline demonstration. Set ESP32 Wi-Fi credentials locally in menuconfig;
+  never commit real credentials. The receiver uses TCP port 5000 and the enabled
+  preview uses HTTP port 8000 unless overridden. Run waits for camera frames.
+  FRAME_STRIDE=1 matches the current firmware's 15 FPS capture output target.
+
+  Mock mode covers feature/configuration logic, prediction gating, queues,
+  reconnect handling, and firmware stream control/backpressure through test
+  doubles. It does not establish live recognition accuracy, FPS, or latency.
+  The slow-TCP-receiver sanity test failed in the published Linux CI run
+  https://github.com/SJSU-CMPE-195/group-project-team-narm/actions/runs/40278493899
+  and remains included so verification reports the failure rather than hiding it.
+
+  The Drive video is linked, but its 3-5 minute duration, narration, complete
+  physical-system journey, and anonymous playback still require verification.
+  English sentence generation, text-to-speech, and final wearable/power
+  integration are incomplete and are not claimed by this manifest.
