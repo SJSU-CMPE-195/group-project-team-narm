@@ -23,6 +23,13 @@ python make_notebooks.py --word back        # one notebook
 python make_notebooks.py --all              # all words in WORDS
 ```
 
+## Before you record: check your hands
+
+Run [`../hands_check.ipynb`](../hands_check.ipynb) once, in the place where you will record. It shows MediaPipe
+dots on your fingers and a live percentage per hand, and saves nothing. Both hands should stay green while you
+move the way you will when signing. (It is a separate notebook because it needs MediaPipe, which these
+collection notebooks deliberately do not.)
+
 ## Using a notebook
 
 1. Open Colab (desktop Chrome), choose **File > Upload notebook**, pick `notebooks/collect_<word>.ipynb`
